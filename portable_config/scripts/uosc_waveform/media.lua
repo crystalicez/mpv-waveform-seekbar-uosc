@@ -89,8 +89,26 @@ local function audio_ordinal_for(track_list, target)
 end
 
 local function selected_audio(snapshot)
-    if snapshot.aid == "no" or snapshot.aid == false then return nil end
     local tracks = track_list(snapshot)
+
+    -- lavfi-complex selects its input tracks independently from the normal
+    -- `aid` selection. In that mode mpv can report aid=no even while audio is
+    -- actively decoded through a graph such as [aid1] ... [ao]. The official
+    -- current-tracks/audio property resolves to the first lavfi-selected audio
+    -- track, so use it before interpreting aid=no as an explicit mute.
+    local lavfi = snapshot.lavfi_complex
+    local current = snapshot.current_audio
+    if type(lavfi) == "string" and lavfi ~= "" and type(current) == "table"
+        and (current.type == nil or current.type == "audio") then
+        for _, track in ipairs(tracks) do
+            if track.type == "audio" and current.id ~= nil
+                and tostring(track.id) == tostring(current.id) then
+                return track, audio_ordinal_for(tracks, track)
+            end
+        end
+    end
+
+    if snapshot.aid == "no" or snapshot.aid == false then return nil end
 
     -- During playback `aid` is the effective main audio track ID. Prefer it
     -- over `selected`, because selected can briefly lag behind aid during a

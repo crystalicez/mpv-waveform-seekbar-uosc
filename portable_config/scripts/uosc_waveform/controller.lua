@@ -135,6 +135,8 @@ function M.start(deps)
             duration = get_native("duration"),
             edition = get_native("edition"),
             aid = get_native("aid"),
+            current_audio = get_native("current-tracks/audio"),
+            lavfi_complex = get_native("lavfi-complex", ""),
             track_list = get_native("track-list", {}),
             demuxer_start_time = get_native("demuxer-start-time", 0),
             rebase_start_time = get_native("rebase-start-time", true),
@@ -770,8 +772,8 @@ function M.start(deps)
 
     local registering_observers = true
     local media_observers = {
-        "path", "stream-open-filename", "duration", "aid", "edition", "track-list", "audio-delay",
-        "demuxer-start-time", "rebase-start-time",
+        "path", "stream-open-filename", "duration", "aid", "current-tracks/audio", "lavfi-complex",
+        "edition", "track-list", "audio-delay", "demuxer-start-time", "rebase-start-time",
     }
     for _, property in ipairs(media_observers) do
         local property_name = property

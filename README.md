@@ -4,13 +4,14 @@ A third-party mpv Lua script that generates a full-track audio waveform with FFm
 
 The waveform follows uosc's seekbar geometry and mouse-proximity animation while leaving all seeking, chapters, thumbnails, A–B loops, and other timeline interactions under uosc's control.
 
-> Current release: **v0.2.0**  
+> Current release: **v0.2.2**  
 > Primary supported platform: **Windows 10/11**
 
 ## Highlights
 
 - Full-track waveform for video and audio-only files
 - Supports multiple embedded or external audio tracks
+- Compatible with audio visualizers that select tracks through `lavfi-complex`
 - Preserves audio timestamps, gaps, stream offsets, and `audio-delay`
 - Short audio is padded with silence on the media timeline and is never stretched
 - Animation follows uosc's timeline and controls proximity behavior
@@ -207,8 +208,10 @@ The waveform is mapped to the same media time axis as the uosc seekbar:
 
 ## Multiple audio tracks
 
-The script follows mpv's active `aid` and supports:
+The script follows mpv's active audio source and supports:
 
+- Normal audio selection through `aid`
+- Audio selected through `lavfi-complex` and exposed by `current-tracks/audio`
 - Multiple embedded audio streams
 - External audio files
 - Runtime track switching
@@ -241,7 +244,8 @@ The cache key includes the source identity, selected audio track, timeline mappi
 2. Confirm that FFmpeg is available and supports `showwavespic`.
 3. Confirm that the file is local, seekable, and has a selected audio track.
 4. For audio-only files, enable `force-window=yes`.
-5. Make sure uosc's timeline is enabled and the mpv window is wide enough.
+5. If an audio visualizer uses `lavfi-complex`, confirm that it exposes a valid `current-tracks/audio` entry.
+6. Make sure uosc's timeline is enabled and the mpv window is wide enough.
 
 Normal ready states include:
 
@@ -295,7 +299,7 @@ overlay_id=62
 - Bitmap overlays are rendered above uosc's ASS layer. Exact compositing would require changes inside uosc itself.
 - uosc does not expose a public timeline-state API. Normal mouse proximity and cursor-leave behavior are mirrored, but private states such as `flash-timeline`, `toggle-progress`, speed dragging, and every forced-visibility transition cannot be observed perfectly.
 - The first generation decodes the complete selected audio stream.
-- Runtime audio filters, tempo processing, equalizers, `lavfi-complex`, and mixed multi-track output are not represented. The waveform represents the selected source stream plus global `audio-delay`.
+- Runtime audio filters, tempo processing, equalizers, and mixed `lavfi-complex` output are not rendered into the waveform. When a visualizer selects audio through `lavfi-complex`, the waveform represents the corresponding source stream plus global `audio-delay`.
 - Complex ordered Matroska editions and linked segments are best effort.
 - External audio with a different timestamp origin may require manual `audio-delay` adjustment.
 - Replacing a file in place while preserving both size and modification time can reuse a stale cache entry.

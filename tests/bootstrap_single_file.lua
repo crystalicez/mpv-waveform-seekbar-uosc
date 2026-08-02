@@ -53,7 +53,7 @@ local ok, result = pcall(chunk)
 assert(ok, result)
 assert(type(result) == "table", "entrypoint should return controller instance")
 assert(expanded[1] == "~~home/", "entrypoint must resolve the actual config directory with ~~home/")
-assert(#osd_messages >= 1 and osd_messages[1]:find("0.2.0", 1, true), "startup OSD should prove the script loaded")
+assert(#osd_messages >= 1 and osd_messages[1]:find("0.2.2", 1, true), "startup OSD should prove the script loaded")
 
 local log_path = config_dir:gsub("[\\/]$", "") .. package.config:sub(1, 1) .. "uosc-waveform.log"
 local log = assert(io.open(log_path, "rb"), "diagnostic log should be created inside config directory")
