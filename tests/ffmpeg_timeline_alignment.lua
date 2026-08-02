@@ -4,11 +4,11 @@ local ffmpeg = require("uosc_waveform.ffmpeg")
 local opts = { opacity = 0.5, analysis_sample_rate = 8000, source_width = 1000, source_height = 64 }
 
 local function filter(delay, ordinal, timeline_offset)
-    local argv = ffmpeg.build_generate_argv("ffmpeg", {
+    local argv = ffmpeg.build_peak_argv("ffmpeg", {
         input_path = "clip.mkv", duration = 10, audio_delay = delay,
         timeline_offset = timeline_offset or 0,
         track = { ff_index = 3, audio_ordinal = 1 },
-    }, opts, "out.tmp", "#FFFFFF", ordinal)
+    }, opts, ordinal)
     for i, value in ipairs(argv) do if value == "-filter_complex" then return argv[i + 1] end end
 end
 

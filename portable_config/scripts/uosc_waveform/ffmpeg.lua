@@ -1,4 +1,3 @@
-local util = require("uosc_waveform.util")
 local mpv_compat = require("uosc_waveform.mpv_compat")
 
 local M = {}
@@ -20,31 +19,28 @@ local function timestamp_shift_filter(delay)
     return string.format("asetpts=PTS-%.9g/TB", math.abs(delay))
 end
 
-function M.build_generate_argv(executable, media_info, opts, temp_path, color, force_audio_ordinal)
+
+function M.build_peak_argv(executable, media_info, opts, force_audio_ordinal)
     local stream = selected_stream_label(media_info, force_audio_ordinal == true)
-    local rgba = util.premultiplied_rgba_hex(color, opts.opacity)
     local duration = assert(tonumber(media_info.duration), "media duration required")
     assert(duration > 0, "media duration must be positive")
+    local sample_rate = assert(tonumber(opts.analysis_sample_rate), "analysis_sample_rate required")
+    local width = assert(tonumber(opts.source_width), "source_width required")
+    assert(sample_rate > 0 and width > 0, "analysis dimensions must be positive")
     local duration_text = string.format("%.9g", duration)
+    local samples_per_frame = math.max(1, math.ceil(sample_rate * duration / width))
     local filters = {}
     local shift = timestamp_shift_filter(
         (tonumber(media_info.audio_delay) or 0) + (tonumber(media_info.timeline_offset) or 0)
     )
     if shift then filters[#filters + 1] = shift end
     filters[#filters + 1] = "aformat=channel_layouts=mono"
-    -- Preserve packet PTS gaps and stream start offsets. first_pts=0 inserts
-    -- leading silence (or trims negative PTS) so X positions match mpv's media
-    -- timeline instead of stretching the available samples across the seekbar.
-    filters[#filters + 1] = "aresample=" .. tostring(opts.analysis_sample_rate) .. ":async=1:first_pts=0"
+    filters[#filters + 1] = "aresample=" .. tostring(sample_rate) .. ":async=1:first_pts=0"
     filters[#filters + 1] = "apad=whole_dur=" .. duration_text
     filters[#filters + 1] = "atrim=duration=" .. duration_text
-    filters[#filters + 1] = string.format(
-        "showwavespic=s=%dx%d:split_channels=0:colors=%s:scale=sqrt:draw=scale:filter=peak",
-        opts.source_width,
-        opts.source_height,
-        rgba
-    )
-    filters[#filters + 1] = "format=bgra[wave]"
+    filters[#filters + 1] = "asetnsamples=n=" .. tostring(samples_per_frame) .. ":p=1"
+    filters[#filters + 1] = "astats=metadata=1:reset=1:measure_perchannel=Peak_level:measure_overall=none"
+    filters[#filters + 1] = "ametadata=print:key=lavfi.astats.1.Peak_level:file=-[analysis]"
     local filter = stream .. table.concat(filters, ",")
 
     return {
@@ -52,18 +48,35 @@ function M.build_generate_argv(executable, media_info, opts, temp_path, color, f
         "-hide_banner",
         "-loglevel", "error",
         "-nostdin",
-        "-y",
         "-i", assert(media_info.input_path, "input_path required"),
         "-filter_complex", filter,
-        "-map", "[wave]",
-        "-frames:v", "1",
-        "-an",
+        "-map", "[analysis]",
+        "-vn",
         "-sn",
         "-dn",
-        "-f", "rawvideo",
-        "-pix_fmt", "bgra",
-        (assert(temp_path, "temp_path required")),
+        "-f", "null",
+        "-",
     }
+end
+
+function M.is_feature_unsupported(result)
+    local detail = table.concat({
+        tostring(result and result.error_string or ""),
+        tostring(result and result.stderr or ""),
+        tostring(result and result.stdout or ""),
+    }, "\n"):lower()
+    if detail:find("no such filter", 1, true) then
+        return detail:find("astats", 1, true) ~= nil
+            or detail:find("asetnsamples", 1, true) ~= nil
+            or detail:find("ametadata", 1, true) ~= nil
+    end
+    if detail:find("option not found", 1, true) or detail:find("error applying option", 1, true) then
+        return detail:find("astats", 1, true) ~= nil
+            or detail:find("asetnsamples", 1, true) ~= nil
+            or detail:find("ametadata", 1, true) ~= nil
+            or detail:find("peak_level", 1, true) ~= nil
+    end
+    return false
 end
 
 function M.is_stream_mapping_error(result)
@@ -106,6 +119,7 @@ function M.start(mpv, argv, callback)
             playback_only = false,
             capture_stdout = true,
             capture_stderr = true,
+            capture_size = 8 * 1024 * 1024,
             args = argv,
         }),
         complete

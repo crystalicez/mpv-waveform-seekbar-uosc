@@ -79,7 +79,7 @@ local app = controller.start({
 
 events["file-loaded"]()
 assert(#commands == 1, "first generation must start")
-local temp_a1 = commands[1].args[#commands[1].args]
+local temp_a1 = app:debug_state().active_temp
 
 props["audio-delay"] = 1
 observers["audio-delay"]()
@@ -88,7 +88,7 @@ assert(#commands == 2, "identity change must start a second generation")
 props["audio-delay"] = 0
 observers["audio-delay"]()
 assert(#commands == 3, "returning to the original identity must start a new generation")
-local temp_a2 = commands[3].args[#commands[3].args]
+local temp_a2 = app:debug_state().active_temp
 assert(temp_a1 ~= temp_a2, "each async attempt must use a unique temporary path")
 files[temp_a2] = "ACTIVE-NEW-ATTEMPT"
 

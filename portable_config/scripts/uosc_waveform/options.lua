@@ -27,6 +27,7 @@ local DEFAULTS = {
     adapter_override = "",
     log_level = "warn",
     analysis_sample_rate = 8000,
+    generation_timeout_seconds = 180,
     overlay_id = 63,
     startup_osd = false,
     diagnostic_log = true,
@@ -122,6 +123,9 @@ function M.normalize(raw, context)
     result.stale_lock_seconds = number_or_default(raw, "stale_lock_seconds", DEFAULTS.stale_lock_seconds, 30, 604800, warnings, true)
     result.lock_poll_ms = number_or_default(raw, "lock_poll_ms", DEFAULTS.lock_poll_ms, 100, 5000, warnings, true)
     result.analysis_sample_rate = number_or_default(raw, "analysis_sample_rate", DEFAULTS.analysis_sample_rate, 1000, 192000, warnings, true)
+    result.generation_timeout_seconds = number_or_default(
+        raw, "generation_timeout_seconds", DEFAULTS.generation_timeout_seconds, 0, 3600, warnings, true
+    )
     result.overlay_id = number_or_default(raw, "overlay_id", DEFAULTS.overlay_id, 0, 63, warnings, true)
 
     local color_mode = tostring(raw.color_mode or DEFAULTS.color_mode):lower()

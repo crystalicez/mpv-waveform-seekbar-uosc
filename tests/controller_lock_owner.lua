@@ -27,10 +27,11 @@ local fs={
     mkdir=function() return true end, list=function() return {} end,
 }
 local controller=require("uosc_waveform.controller")
-local app=controller.start({mp=mp,fs=fs,now=function() return 100 end,session_id="ours",raw_options={cache_dir=[[C:\Cache]],media_debounce_ms=0},context={config_dir="",platform="windows"},uosc_config={},uosc_detected=true})
+local app=controller.start({mp=mp,fs=fs,now=function() return 100 end,session_id="ours",process_id=4321,raw_options={cache_dir=[[C:\Cache]],media_debounce_ms=0},context={config_dir="",platform="windows"},uosc_config={},uosc_detected=true})
 events["file-loaded"]()
 local lock=assert(app:debug_state().paths.lock)
 assert(files[lock] and files[lock]:find("owner=ours",1,true), "instance must own initial lock")
+assert(files[lock]:find("pid=4321",1,true), "controller must pass its process ID into the lock payload")
 files[lock]="created=101\nowner=peer\n"
 app:shutdown()
 assert(files[lock] ~= nil, "shutdown must not delete a lock that was replaced by another owner")

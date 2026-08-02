@@ -13,8 +13,12 @@ local files = {
     runtime .. "/scripts/uosc_waveform/overlay.lua",
     runtime .. "/scripts/uosc_waveform/util.lua",
     runtime .. "/scripts/uosc_waveform/windows_lock.lua",
+    runtime .. "/scripts/uosc_waveform/waveform.lua",
 }
-local forbidden = { "waveform" .. "_preview", "waveform" .. "-preview", "Waveform" .. " Preview" }
+local forbidden = {
+    "waveform" .. "_preview", "waveform" .. "-preview", "Waveform" .. " Preview",
+    "show" .. "wavespic",
+}
 for _, path in ipairs(files) do
     local handle = assert(io.open(path, "rb"), "missing runtime file: " .. path)
     local text = handle:read("*a")

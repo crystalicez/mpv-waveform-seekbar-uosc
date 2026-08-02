@@ -52,7 +52,7 @@ package.preload["uosc_waveform.cache"] = function()
     return {
         expected_size=function() return 1 end, identity=function() return "id" end,
         paths=function() return {raw="raw",key="id",lock="lock",temp="temp.tmp"} end,
-        validate=function() return true end, cleanup_candidates=function() return {} end,
+        validate=function() return true end, validate_entry=function() return true end, cleanup_candidates=function() return {} end, cleanup_groups=function() return {} end,
         stale_auxiliary_candidates=function() return {} end, lock_status=function() return "free" end,
         remove_owned_lock=function() return true end,
     }

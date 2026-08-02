@@ -100,6 +100,7 @@ local app = controller.start({
         resize_debounce_ms = 0,
         media_debounce_ms = 200,
         minimum_timeline_width = 1,
+        generation_timeout_seconds = 0,
     },
     context = { config_dir = [[C:\Config]], platform = "windows" },
     uosc_config = { timeline_size = 40 },

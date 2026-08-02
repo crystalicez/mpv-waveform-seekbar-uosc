@@ -2,7 +2,7 @@ local util = require("uosc_waveform.util")
 
 local M = {}
 
-local CACHE_FORMAT = 5
+local CACHE_FORMAT = 6
 
 local function field(value)
     if value == nil then return "" end
@@ -37,7 +37,7 @@ function M.identity(media_info, opts)
         "opacity=" .. field(opts.opacity),
         "waveform-color=" .. field(color),
         "analysis-sample-rate=" .. field(opts.analysis_sample_rate),
-        "filter=pts-aligned:async:first-pts-zero:showwavespic:peak:sqrt:scale",
+        "filter=peak-metadata-v1:pts-aligned:async:first-pts-zero:astats-peak:sqrt",
     }
     return table.concat(lines, "\n")
 end
@@ -56,6 +56,8 @@ function M.paths(cache_dir, canonical_string, session_id)
     local session = tostring(session_id or "session"):gsub("[^%w_.-]", "_")
     return {
         key = key,
+        width = width,
+        height = height,
         raw = prefix .. ".bgra",
         temp = prefix .. "." .. session .. ".tmp",
         lock = prefix .. ".lock",
@@ -75,42 +77,141 @@ function M.validate(fs, raw_path, expected_size)
     return true
 end
 
-local function lock_created(fs, lock_path)
+local function parse_manifest(text)
+    if type(text) ~= "string" or text == "" then return nil end
+    local result = {}
+    for line in text:gmatch("[^\r\n]+") do
+        local key, value = line:match("^([%w_-]+)=(.*)$")
+        if not key then return nil end
+        result[key] = value
+    end
+    return result
+end
+
+function M.manifest_content(paths, expected_size, metadata)
+    metadata = metadata or {}
+    return table.concat({
+        "cache-format=" .. tostring(CACHE_FORMAT),
+        "key=" .. tostring(paths.key or ""),
+        "width=" .. tostring(tonumber(metadata.width) or tonumber(paths.width) or 0),
+        "height=" .. tostring(tonumber(metadata.height) or tonumber(paths.height) or 0),
+        "size=" .. tostring(tonumber(expected_size) or 0),
+        "created=" .. tostring(tonumber(metadata.created) or 0),
+        "",
+    }, "\n")
+end
+
+function M.validate_entry(fs, paths, expected_size)
+    if not paths then return false, "missing-paths" end
+    local actual = fs and fs.size and fs.size(paths.raw) or nil
+    if actual == nil then return false, "missing-raw" end
+    if actual ~= expected_size then return false, "invalid-size" end
+    local text = fs and fs.read and fs.read(paths.meta) or nil
+    if text == nil then return false, "missing-meta" end
+    local manifest = parse_manifest(text)
+    if not manifest then return false, "invalid-meta" end
+    if tonumber(manifest["cache-format"]) ~= CACHE_FORMAT then return false, "meta-format-mismatch" end
+    if manifest.key ~= tostring(paths.key) then return false, "meta-key-mismatch" end
+    if tonumber(manifest.size) ~= tonumber(expected_size) then return false, "meta-size-mismatch" end
+    if tonumber(manifest.width) ~= tonumber(paths.width) then return false, "meta-width-mismatch" end
+    if tonumber(manifest.height) ~= tonumber(paths.height) then return false, "meta-height-mismatch" end
+    if tonumber(manifest.created) == nil then return false, "meta-created-invalid" end
+    return true
+end
+
+function M.publish_entry(fs, paths, temp_raw, expected_size, metadata)
+    if not fs or not fs.size or fs.size(temp_raw) ~= expected_size then
+        if fs and fs.remove then fs.remove(temp_raw) end
+        return false, "invalid-size"
+    end
+    if M.validate_entry(fs, paths, expected_size) then
+        if fs.remove then fs.remove(temp_raw) end
+        return false, "destination-exists"
+    end
+
+    local moved, move_error = fs.rename(temp_raw, paths.raw)
+    if not moved then
+        if M.validate_entry(fs, paths, expected_size) then
+            if fs.remove then fs.remove(temp_raw) end
+            return false, "destination-exists"
+        end
+        return false, "raw-publish-failed:" .. tostring(move_error), temp_raw
+    end
+
+    local meta_temp = tostring(temp_raw) .. ".meta.tmp"
+    local manifest = M.manifest_content(paths, expected_size, metadata)
+    if not fs.write then return false, "meta-write-failed:write-unavailable", paths.raw end
+    local wrote, write_error = fs.write(meta_temp, manifest)
+    if wrote == false then
+        if fs.remove then fs.remove(meta_temp) end
+        return false, "meta-write-failed:" .. tostring(write_error), paths.raw
+    end
+    local meta_moved, meta_error = fs.rename(meta_temp, paths.meta)
+    if not meta_moved then
+        if M.validate_entry(fs, paths, expected_size) then
+            if fs.remove then fs.remove(meta_temp) end
+            return false, "destination-exists"
+        end
+        if fs.remove then fs.remove(meta_temp) end
+        return false, "meta-publish-failed:" .. tostring(meta_error), paths.raw
+    end
+    if not M.validate_entry(fs, paths, expected_size) then
+        return false, "commit-validation-failed", paths.raw
+    end
+    return true
+end
+
+local function lock_metadata(fs, lock_path)
     if fs.read then
         local content = fs.read(lock_path)
-        local parsed = content and tonumber(content:match("created=(%-?%d+)") or "")
-        if parsed then return parsed end
+        if type(content) == "string" then
+            local created = tonumber(content:match("created=(%-?%d+)"))
+            local pid = tonumber(content:match("pid=(%d+)"))
+            if created then return created, pid end
+        end
     end
-    if fs.mtime then return tonumber(fs.mtime(lock_path)) end
-    return nil
+    if fs.mtime then return tonumber(fs.mtime(lock_path)), nil end
+    return nil, nil
 end
 
 function M.lock_status(fs, lock_path, now, stale_seconds)
     if not fs or not fs.exists or not fs.exists(lock_path) then return "free" end
-    local created = lock_created(fs, lock_path)
+    local created, pid = lock_metadata(fs, lock_path)
     if not created then return "stale" end
-    if tonumber(now) - created >= tonumber(stale_seconds) then return "stale" end
-    return "active"
+    local age = (tonumber(now) or 0) - created
+    if age < (tonumber(stale_seconds) or 0) then return "active" end
+    if not pid or not fs.process_alive then return "stale" end
+    local ok, alive = pcall(fs.process_alive, pid)
+    return ok and alive == true and "active" or "stale"
 end
 
 local function safe_owner(owner)
     return tostring(owner or "unknown"):gsub("[\r\n]", "_")
 end
 
-function M.acquire_lock(fs, lock_path, now, owner)
-    local content = string.format("created=%d\nowner=%s\n", tonumber(now) or 0, safe_owner(owner))
+local function lock_content(now, owner, pid)
+    local lines = {
+        string.format("created=%d", tonumber(now) or 0),
+        "owner=" .. safe_owner(owner),
+    }
+    if tonumber(pid) then lines[#lines + 1] = "pid=" .. tostring(math.floor(tonumber(pid))) end
+    return table.concat(lines, "\n") .. "\n"
+end
+
+function M.acquire_lock(fs, lock_path, now, owner, pid)
+    local content = lock_content(now, owner, pid)
     if fs and fs.create_exclusive then
         local ok, err = fs.create_exclusive(lock_path, content, tonumber(now) or 0)
         if not ok then return false, err or "exists" end
         return true
     end
     if fs and fs.exists and fs.exists(lock_path) then return false, "exists" end
-    return M.write_lock(fs, lock_path, now, owner)
+    return M.write_lock(fs, lock_path, now, owner, pid)
 end
 
-function M.write_lock(fs, lock_path, now, owner)
+function M.write_lock(fs, lock_path, now, owner, pid)
     if not fs or not fs.write then return false, "write-unavailable" end
-    local content = string.format("created=%d\nowner=%s\n", tonumber(now) or 0, safe_owner(owner))
+    local content = lock_content(now, owner, pid)
     local ok, err = fs.write(lock_path, content, tonumber(now) or 0)
     if ok == false then return false, err or "write-failed" end
     return true
@@ -155,43 +256,70 @@ local function is_cleanup_eligible(entry)
     return is_cache_payload(entry.path)
 end
 
-function M.cleanup_candidates(entries, now, max_age_seconds, max_total_bytes)
-    local eligible = {}
+local function cache_group_key(path)
+    local name = basename(path)
+    local key, extension = name:match("^([%da-fA-F]+%-%d+x%d+)%.(bgra)$")
+    if key then return key, extension end
+    key, extension = name:match("^([%da-fA-F]+%-%d+x%d+)%.(meta)$")
+    return key, extension
+end
+
+function M.cleanup_groups(entries, now, max_age_seconds, max_total_bytes, protected)
+    protected = protected or {}
+    local groups_by_key = {}
     for _, entry in ipairs(entries or {}) do
-        if is_cleanup_eligible(entry) and (tonumber(entry.mtime) or 0) > 0 then
-            eligible[#eligible + 1] = {
-                path = entry.path,
-                size = tonumber(entry.size) or 0,
-                mtime = tonumber(entry.mtime) or 0,
-            }
+        local path = tostring(entry.path or "")
+        local key = cache_group_key(path)
+        if key then
+            local group = groups_by_key[key]
+            if not group then
+                group = { key = key, paths = {}, size = 0, mtime = 0, protected = false }
+                groups_by_key[key] = group
+            end
+            group.paths[#group.paths + 1] = path
+            group.size = group.size + (tonumber(entry.size) or 0)
+            group.mtime = math.max(group.mtime, tonumber(entry.mtime) or 0)
+            if entry.active or protected[key] or protected[path] then group.protected = true end
         end
     end
-    table.sort(eligible, function(a, b)
-        if a.mtime == b.mtime then return tostring(a.path) < tostring(b.path) end
+    local groups = {}
+    local total = 0
+    for _, group in pairs(groups_by_key) do
+        table.sort(group.paths)
+        groups[#groups + 1] = group
+        total = total + group.size
+    end
+    table.sort(groups, function(a, b)
+        if a.mtime == b.mtime then return a.key < b.key end
         return a.mtime < b.mtime
     end)
 
     local selected, selected_set = {}, {}
-    local total = 0
-    for _, entry in ipairs(eligible) do total = total + entry.size end
-
-    for _, entry in ipairs(eligible) do
-        if tonumber(now) - entry.mtime >= tonumber(max_age_seconds) then
-            selected[#selected + 1] = entry.path
-            selected_set[entry.path] = true
-            total = total - entry.size
+    for _, group in ipairs(groups) do
+        if not group.protected and group.mtime > 0
+            and tonumber(now) - group.mtime >= tonumber(max_age_seconds) then
+            selected[#selected + 1] = group
+            selected_set[group.key] = true
+            total = total - group.size
         end
     end
-
-    for _, entry in ipairs(eligible) do
+    for _, group in ipairs(groups) do
         if total <= tonumber(max_total_bytes) then break end
-        if not selected_set[entry.path] then
-            selected[#selected + 1] = entry.path
-            selected_set[entry.path] = true
-            total = total - entry.size
+        if not group.protected and not selected_set[group.key] then
+            selected[#selected + 1] = group
+            selected_set[group.key] = true
+            total = total - group.size
         end
     end
     return selected
+end
+
+function M.cleanup_candidates(entries, now, max_age_seconds, max_total_bytes)
+    local paths = {}
+    for _, group in ipairs(M.cleanup_groups(entries, now, max_age_seconds, max_total_bytes, {})) do
+        for _, path in ipairs(group.paths) do paths[#paths + 1] = path end
+    end
+    return paths
 end
 
 function M.publish(fs, temp_path, raw_path, expected_size)

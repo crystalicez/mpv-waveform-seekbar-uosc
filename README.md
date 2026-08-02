@@ -1,50 +1,55 @@
 # uosc-waveform
 
-A third-party mpv Lua script that generates a full-track audio waveform with FFmpeg and displays it inside the [uosc](https://github.com/tomasklaen/uosc) timeline.
+A third-party mpv Lua script that analyzes the selected audio track with FFmpeg and displays a full-track waveform inside the [uosc](https://github.com/tomasklaen/uosc) timeline.
 
-The waveform follows uosc's seekbar geometry and mouse-proximity animation while leaving all seeking, chapters, thumbnails, A–B loops, and other timeline interactions under uosc's control.
+The waveform follows uosc's seekbar geometry and mouse-proximity animation. uosc remains responsible for seeking, chapters, thumbnails, A–B loops, and every other timeline interaction.
 
-> Current release: **v0.2.2**  
+> Current stable release: **v0.3.0**  
 > Primary supported platform: **Windows 10/11**
 
 ## Highlights
 
 - Full-track waveform for video and audio-only files
-- Supports multiple embedded or external audio tracks
-- Compatible with audio visualizers that select tracks through `lavfi-complex`
-- Preserves audio timestamps, gaps, stream offsets, and `audio-delay`
-- Short audio is padded with silence on the media timeline and is never stretched
-- Animation follows uosc's timeline and controls proximity behavior
-- One cached BGRA bitmap overlay; no redraw tied to playback position
-- Asynchronous FFmpeg analysis does not pause playback
-- Handles spaces, Unicode filenames, Thai/Japanese text, emoji, and Windows shell metacharacters
+- Supports embedded, external, and multiple audio tracks
+- Compatible with audio visualizers that select audio through `lavfi-complex`
+- Preserves packet timestamps, leading silence, gaps, stream offsets, and `audio-delay`
+- Short audio leaves an empty tail and is never stretched to fill the seekbar
+- Bounded-memory FFmpeg analysis followed by a fixed-size Lua BGRA renderer
+- One cached bitmap overlay; no redraw tied to playback position
+- Asynchronous generation with cancellation and a configurable watchdog
+- Race-safe multi-instance cache publication
+- Process-aware locks that survive suspend and wake
+- Dormant disabled mode and explicit listener/timer cleanup
+- Spaces, Unicode filenames, Thai/Japanese text, emoji, and Windows shell metacharacters are supported
 - Startup is silent by default
 
 ## How it works
 
-1. The script reads the currently selected audio track from mpv.
-2. FFmpeg renders the complete track to a transparent BGRA waveform bitmap.
-3. The bitmap is cached per media file, audio track, timeline mapping, color, and analysis settings.
-4. A single mpv bitmap overlay is resized and positioned over the uosc timeline.
-5. uosc remains responsible for all mouse and seekbar interaction.
+1. The script resolves the audio source currently used by mpv, including `current-tracks/audio` when a visualizer uses `lavfi-complex`.
+2. FFmpeg converts the selected stream to timestamp-aligned mono analysis frames and emits one `Peak_level` value per timeline segment.
+3. Lua maps those values to the media timeline, applies square-root amplitude scaling, and renders a premultiplied BGRA bitmap.
+4. The bitmap and a commit manifest are cached as one validated entry.
+5. A single mpv bitmap overlay is positioned over the uosc timeline.
 
-The first load of a file may take a moment because FFmpeg analyzes the full selected audio stream. Later loads use the cache.
+The analysis pipeline uses FFmpeg's `asetnsamples`, `astats`, and `ametadata` filters. It does not use `showwavespic`, whose memory use can grow significantly with long media.
+
+The first load of an uncached track analyzes the complete selected audio stream. Later loads use the cache.
 
 ## Requirements
 
 | Component | Requirement |
 |---|---|
-| Operating system | Windows 10 or Windows 11 |
+| Operating system | Windows 10/11; Linux is used for automated tests |
 | mpv | 0.41.0 stable or a compatible recent development build |
 | uosc | 5.12.x |
-| FFmpeg | A build containing the `showwavespic` filter |
-| Media | Local, seekable file with a known positive duration and a selected audio track |
+| FFmpeg | Build containing `asetnsamples`, `astats`, and `ametadata` |
+| Media | Local, seekable source with a known positive duration and an audio track |
 
-Network URLs, YouTube/live streams, stdin, pipes, DVD, and Blu-ray sources are intentionally skipped.
+Network URLs, live streams, stdin, pipes, DVD, and Blu-ray sources are intentionally skipped.
 
 ## Installation
 
-Download the latest release ZIP from the repository's **Releases** page.
+Download the ZIP from the repository's **Releases** page.
 
 ### Standard mpv installation
 
@@ -70,6 +75,7 @@ The resulting layout should be:
 │     ├─ options.lua
 │     ├─ overlay.lua
 │     ├─ util.lua
+│     ├─ waveform.lua
 │     └─ windows_lock.lua
 └─ script-opts\
    └─ uosc-waveform.conf
@@ -83,7 +89,7 @@ Extract the release ZIP next to `mpv.exe`. The included `portable_config` direct
 
 ### Audio-only files
 
-mpv needs a visible window for uosc and the waveform overlay. Add this to `mpv.conf` when playing MP3, FLAC, M4A, Opus, Ogg, WAV, and other audio-only files:
+mpv needs a visible window for uosc and the bitmap overlay. Add this to `mpv.conf` when playing MP3, FLAC, M4A, Opus, Ogg, WAV, and similar files:
 
 ```ini
 force-window=yes
@@ -93,24 +99,26 @@ Audio files with embedded cover art are supported.
 
 ## FFmpeg setup
 
-When FFmpeg is available in `PATH`, keep the default:
+When FFmpeg is available in `PATH`, keep:
 
 ```ini
 ffmpeg_path=ffmpeg
 ```
 
-To use an explicit executable:
+To select an explicit executable:
 
 ```ini
 ffmpeg_path=C:\Tools\FFmpeg\bin\ffmpeg.exe
 ```
 
-Do not wrap the path in shell quotes. It is passed to mpv as one subprocess argument.
+Do not add shell quotes around the path. It is passed to mpv as one subprocess argument.
 
-Confirm that the required filter is available:
+Check the required filters:
 
 ```bat
-ffmpeg.exe -hide_banner -h filter=showwavespic
+ffmpeg.exe -hide_banner -h filter=asetnsamples
+ffmpeg.exe -hide_banner -h filter=astats
+ffmpeg.exe -hide_banner -h filter=ametadata
 ```
 
 ## Controls
@@ -118,15 +126,15 @@ ffmpeg.exe -hide_banner -h filter=showwavespic
 | Key | Action |
 |---|---|
 | `Alt+w` | Toggle the waveform |
-| `Alt+Shift+w` | Show script state, active config directory, and log path |
+| `Alt+Shift+w` | Show state, generation phase, reason/error, config directory, and log path |
 
-The toggle is also available as a script message:
+The toggle is also exposed as:
 
 ```text
 script-message uosc-waveform-toggle
 ```
 
-The built-in key binding can be replaced in `input.conf`:
+A custom `input.conf` binding can call the same message:
 
 ```text
 Alt+w script-message uosc-waveform-toggle
@@ -147,6 +155,7 @@ enabled=yes
 ffmpeg_path=ffmpeg
 opacity=0.38
 color_mode=auto
+generation_timeout_seconds=180
 startup_osd=no
 log_level=warn
 ```
@@ -158,102 +167,152 @@ log_level=warn
 | `enabled` | `yes` | yes/no | Start with the waveform enabled |
 | `opacity` | `0.38` | 0–1 | Premultiplied waveform opacity |
 | `color_mode` | `auto` | auto/light/dark | Select waveform contrast mode |
-| `light_color` | `#101010` | `#RRGGBB` | Waveform color for light UI backgrounds |
-| `dark_color` | `#F2F2F2` | `#RRGGBB` | Waveform color for dark UI backgrounds |
+| `light_color` | `#101010` | `#RRGGBB` | Color used against light backgrounds |
+| `dark_color` | `#F2F2F2` | `#RRGGBB` | Color used against dark backgrounds |
 | `displayed_height_ratio` | `0.78` | 0.05–1 | Fraction of available timeline height used by the waveform |
-| `reserved_marker_ratio` | `0.20` | 0–0.8 | Clearance reserved for uosc timeline markers |
+| `reserved_marker_ratio` | `0.20` | 0–0.8 | Symmetric clearance for uosc timeline markers |
 | `reserved_progress_px` | `2` | 0–64 | Minimum clearance for the minimized progress line |
 | `minimum_timeline_width` | `320` | 1–16384 | Hide the waveform below this OSD width |
-| `overlay_id` | `63` | 0–63 | mpv bitmap-overlay ID used by the script |
+| `overlay_id` | `63` | 0–63 | mpv bitmap-overlay ID |
 
 ### Analysis and cache options
 
 | Option | Default | Accepted values | Description |
 |---|---:|---|---|
 | `ffmpeg_path` | `ffmpeg` | executable path | FFmpeg executable |
-| `source_width` | `4096` | 256–16384 | Width of the cached waveform bitmap |
-| `source_height` | `128` | 16–512 | Height of the cached waveform bitmap |
-| `analysis_sample_rate` | `8000` | 1000–192000 | Mono sample rate used for waveform analysis |
+| `source_width` | `4096` | 256–16384 | Number of analysis bins and bitmap width |
+| `source_height` | `128` | 16–512 | Cached bitmap height |
+| `analysis_sample_rate` | `8000` | 1000–192000 | Mono analysis sample rate |
+| `generation_timeout_seconds` | `180` | 0–3600 | Abort a stuck FFmpeg process; `0` disables the watchdog |
 | `cache_dir` | `~~/cache/uosc-waveform` | local directory | Waveform cache directory |
-| `max_cache_age_days` | `60` | 1–3650 | Cache age cleanup target |
-| `max_cache_mb` | `512` | 64–1048576 | Cache size cleanup target |
-| `stale_lock_seconds` | `900` | 30–604800 | Age at which an abandoned generation lock is considered stale |
-| `lock_poll_ms` | `500` | 100–5000 | Poll interval while another mpv instance generates the same waveform |
+| `max_cache_age_days` | `60` | 1–3650 | Age target used by grouped cleanup |
+| `max_cache_mb` | `512` | 64–1048576 | Size target used by grouped cleanup |
+| `stale_lock_seconds` | `900` | 30–604800 | Age before a lock's owner PID is checked |
+| `lock_poll_ms` | `500` | 100–5000 | Poll interval while another instance generates the same entry |
 
-### Runtime options
+Cache cleanup runs after the first ready entry, after every eight newly published entries, or when a ready event occurs at least ten minutes after the last cleanup. It does not use a recurring background timer.
+
+### Runtime and diagnostic options
 
 | Option | Default | Accepted values | Description |
 |---|---:|---|---|
-| `resize_debounce_ms` | `120` | 0–5000 | Debounce for window resize events |
-| `mouse_update_interval_ms` | `16` | 0–1000 | Mouse-proximity update throttle; `0` updates on every event |
-| `media_debounce_ms` | `250` | 0–5000 | Coalesces rapid file and track property changes |
-| `compatibility` | `uosc-5.12` | adapter name | uosc geometry adapter |
+| `resize_debounce_ms` | `120` | 0–5000 | Debounce for geometry changes |
+| `mouse_update_interval_ms` | `16` | 0–1000 | Mouse-proximity throttle; `0` handles every event |
+| `media_debounce_ms` | `250` | 0–5000 | Coalesce rapid media/track changes |
+| `compatibility` | `uosc-5.12` | adapter name | Geometry compatibility adapter |
 | `adapter_override` | empty | adapter name | Explicit adapter override for testing |
-| `startup_osd` | `no` | yes/no | Show a load confirmation banner at startup |
-| `diagnostic_log` | `yes` | yes/no | Write the internal diagnostic log |
-| `log_level` | `warn` | error/warn/info/debug | Runtime and diagnostic logging threshold |
+| `startup_osd` | `no` | yes/no | Show a load confirmation banner |
+| `diagnostic_log` | `yes` | yes/no | Write the diagnostic log |
+| `log_level` | `warn` | error/warn/info/debug | Runtime and diagnostic verbosity |
 
-Invalid, non-finite, or out-of-range values fall back to defaults or are clamped to safe ranges.
+Invalid or non-finite values fall back to defaults or are clamped to safe ranges.
 
-## Timeline accuracy
+## Timeline behavior
 
-The waveform is mapped to the same media time axis as the uosc seekbar:
+The bitmap uses the same media-time axis as the uosc seekbar:
 
-- Audio that begins later leaves empty space at the beginning.
-- Audio that ends early leaves empty space at the end.
-- Audio longer than the media timeline is cropped at the timeline boundary.
-- Audio is never compressed or stretched to fill the seekbar.
-- Positive and negative `audio-delay` values shift the waveform accordingly.
+- Late audio leaves an empty beginning.
+- Early-ending audio leaves an empty tail.
+- Audio beyond the media duration is cropped.
+- Audio is never compressed or stretched to fill the timeline.
+- Positive and negative `audio-delay` shift the waveform.
 - `rebase-start-time=no` preserves leading demuxer timeline space.
+- Gaps in packet timestamps remain gaps in the waveform.
 
-## Multiple audio tracks
+## Audio selection
 
-The script follows mpv's active audio source and supports:
+The script supports:
 
-- Normal audio selection through `aid`
-- Audio selected through `lavfi-complex` and exposed by `current-tracks/audio`
-- Multiple embedded audio streams
+- Normal `aid` selection
+- `current-tracks/audio` selection through `lavfi-complex`
+- Multiple embedded tracks
 - External audio files
 - Runtime track switching
-- FFmpeg stream index selection
-- Source-scoped ordinal fallback when stream indexes are unavailable
+- FFmpeg stream-index selection
+- Source-scoped audio-ordinal fallback when a stream index is unavailable
 
-Switching tracks invalidates the active waveform and loads or generates the correct cached result.
+Changing the active audio source invalidates the current identity and loads or generates the matching cache entry.
 
-## Cache behavior
+## Cache format and concurrency
 
-Default cache location:
+The default directory is:
 
 ```text
 <mpv-config>\cache\uosc-waveform\
 ```
 
-Each cached BGRA payload is validated against:
+A committed entry contains:
+
+```text
+<key>.bgra
+<key>.meta
+```
+
+The raw bitmap must be exactly:
 
 ```text
 source_width × source_height × 4 bytes
 ```
 
-The cache key includes the source identity, selected audio track, timeline mapping, colors, opacity, and analysis settings. Concurrent mpv instances coordinate through generation locks and publish completed output safely.
+The manifest is committed last and records the cache format, key, dimensions, byte size, and creation time. A raw file without a valid matching manifest is not accepted as a cache hit.
+
+The cache format for this release candidate is **6**. Older entries are ignored and regenerated automatically; manual deletion is not required.
+
+Concurrent mpv instances use exclusive generation locks. Locks include the owner session and process ID. After `stale_lock_seconds`, the owner process is checked before a lock can be removed, preventing a normal suspend/wake interval from invalidating a live owner's work. Final cache publication remains race-safe even when locking is unavailable.
+
+## Runtime states
+
+`Alt+Shift+w` reports public state plus internal detail:
+
+```text
+state=GENERATING
+phase=analyzing
+reason=none
+error=none
+detail=none
+```
+
+Public states:
+
+| State | Meaning |
+|---|---|
+| `DISABLED` | Feature is toggled off; media and mouse work are dormant |
+| `UNSUPPORTED` | Current media cannot be analyzed; see `reason` |
+| `WAITING_FOR_LOCK` | Another instance is generating the same cache entry |
+| `GENERATING` | See `phase=analyzing`, `rendering`, or `publishing` |
+| `READY_HIDDEN` | Cache is ready but the uosc timeline is minimized/hidden |
+| `READY_VISIBLE` | Waveform overlay is visible |
+| `ERROR` | See `error` and `detail` |
+
+Common errors include `generation-timeout`, `ffmpeg-feature-unsupported`, `peak-parse-failed`, `cache-publish-failed`, and `duplicate-instance`.
+
+## Performance characteristics
+
+- The default cached bitmap is fixed at `4096 × 128 × 4 = 2 MiB`.
+- FFmpeg emits approximately `source_width` metadata frames instead of constructing a full video frame internally.
+- Mouse work is throttled to about 60 updates per second by default.
+- Disabled mode schedules no mouse, geometry, or media timers.
+- There is no periodic cache-cleanup or lock-heartbeat loop.
+
+Automated Linux release gates include:
+
+- Two-hour audio analysis below **128 MiB peak RSS**
+- One million mouse events followed by GC
+- Fifty thousand `file-loaded → end-file` lifecycle cycles followed by GC
+- Visual-envelope comparison against the previous renderer across silence, impulses, gaps, delays, short audio, and multiple tracks
+
+Native Windows profiling and an eight-hour soak remain required before promoting the release candidate to a stable release.
 
 ## Troubleshooting
 
 ### No waveform appears
 
-1. Press `Alt+Shift+w` and check the reported state.
-2. Confirm that FFmpeg is available and supports `showwavespic`.
-3. Confirm that the file is local, seekable, and has a selected audio track.
-4. For audio-only files, enable `force-window=yes`.
-5. If an audio visualizer uses `lavfi-complex`, confirm that it exposes a valid `current-tracks/audio` entry.
-6. Make sure uosc's timeline is enabled and the mpv window is wide enough.
-
-Normal ready states include:
-
-```text
-GENERATING
-READY_HIDDEN
-READY_VISIBLE
-```
+1. Press `Alt+Shift+w` and read `state`, `reason`, `error`, and `detail`.
+2. Confirm FFmpeg is available and contains `asetnsamples`, `astats`, and `ametadata`.
+3. Confirm the source is local, seekable, and has a positive duration.
+4. For audio-only media, enable `force-window=yes`.
+5. For visualizers using `lavfi-complex`, confirm mpv exposes `current-tracks/audio`.
+6. Confirm uosc's timeline is enabled and the window is wider than `minimum_timeline_width`.
 
 ### Enable detailed logging
 
@@ -270,11 +329,7 @@ Restart mpv, reproduce the issue, and inspect:
 <mpv-config>\uosc-waveform.log
 ```
 
-The diagnostic log rotates at 2 MiB to:
-
-```text
-uosc-waveform.log.old
-```
+The log rotates at 2 MiB to `uosc-waveform.log.old`.
 
 ### Script does not load
 
@@ -288,7 +343,7 @@ It creates `uosc-waveform-diagnostic-report.txt` with environment and file-layou
 
 ### Overlay conflict
 
-The default bitmap overlay ID is `63`. Another bitmap-overlay script using the same ID can replace the waveform. Change this setting when needed:
+The default bitmap overlay ID is `63`. Change it if another bitmap-overlay script uses the same ID:
 
 ```ini
 overlay_id=62
@@ -296,14 +351,36 @@ overlay_id=62
 
 ## Known limitations
 
-- Bitmap overlays are rendered above uosc's ASS layer. Exact compositing would require changes inside uosc itself.
-- uosc does not expose a public timeline-state API. Normal mouse proximity and cursor-leave behavior are mirrored, but private states such as `flash-timeline`, `toggle-progress`, speed dragging, and every forced-visibility transition cannot be observed perfectly.
-- The first generation decodes the complete selected audio stream.
-- Runtime audio filters, tempo processing, equalizers, and mixed `lavfi-complex` output are not rendered into the waveform. When a visualizer selects audio through `lavfi-complex`, the waveform represents the corresponding source stream plus global `audio-delay`.
-- Complex ordered Matroska editions and linked segments are best effort.
-- External audio with a different timestamp origin may require manual `audio-delay` adjustment.
-- Replacing a file in place while preserving both size and modification time can reuse a stale cache entry.
-- A generation that exceeds `stale_lock_seconds` may duplicate work, although cache publication remains race-safe.
+- Bitmap overlays are rendered above uosc's ASS layer. Exact compositing would require integration inside uosc.
+- uosc has no public timeline-state API. Normal proximity and cursor-leave behavior are mirrored, but private states such as every forced flash/toggle transition cannot be observed perfectly.
+- The first uncached generation still decodes the complete selected audio stream.
+- The waveform represents the selected source track plus global `audio-delay`; it does not render the final output after equalizers, compressors, tempo processing, or arbitrary mixing filters.
+- Ordered Matroska editions, linked segments, and unusual external timestamp origins are best effort.
+- Replacing a file while preserving both byte size and modification time can reuse its previous identity.
+- PID liveness protects normal suspend/wake behavior, but a PID reused by the operating system after an unclean crash can delay stale-lock recovery until the next process state change.
+
+## Development
+
+Run the complete Linux/macOS test suite:
+
+```bash
+LUA_BIN=lua5.4 tools/run-tests.sh
+```
+
+Run on Windows PowerShell:
+
+```powershell
+$env:LUA_BIN = 'lua.exe'
+tools\run-tests.ps1
+```
+
+Build a deterministic verified ZIP:
+
+```bash
+python3 tools/package-release.py
+```
+
+CI tests Lua 5.2, Lua 5.4, LuaJIT, Windows, FFmpeg integration, stress/GC behavior, visual parity, and source-to-ZIP byte equality.
 
 ## Project structure
 
@@ -316,24 +393,25 @@ portable_config/
    └─ uosc-waveform.conf
 
 tests/
-examples/
-diagnose-uosc-waveform.cmd
-diagnose-uosc-waveform.ps1
+├─ helpers/
+├─ integration/
+└─ stress/
+
+tools/
+.github/workflows/test.yml
 ```
 
 ## Contributing
 
 Bug reports should include:
 
-- mpv version
-- uosc version
-- FFmpeg version
-- Relevant `uosc.conf` timeline settings
+- mpv, uosc, and FFmpeg versions
+- Relevant uosc timeline configuration
 - `uosc-waveform.conf`
-- The state shown by `Alt+Shift+w`
-- The relevant section of `uosc-waveform.log` with `log_level=debug`
+- The complete `Alt+Shift+w` status
+- Relevant log lines captured with `log_level=debug`
 
-Please avoid uploading private media files. A small synthetic sample that reproduces the issue is preferred.
+Do not upload private media. A small synthetic reproducer is preferred.
 
 ## License
 

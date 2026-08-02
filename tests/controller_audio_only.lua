@@ -1,4 +1,5 @@
 local root = assert(arg[1], "source root required")
+local peak_metadata = assert(loadfile(root .. "/tests/helpers/peak_metadata.lua"))()
 package.path = root .. "/portable_config/scripts/?.lua;" .. root .. "/portable_config/scripts/?/init.lua;" .. package.path
 
 local observers, events, async_callbacks = {}, {}, {}
@@ -43,7 +44,7 @@ local mp = {
     msg = { info=function() end, warn=function() end, debug=function() end, error=function() end },
 }
 local files = {}
-local expected_size = 4096 * 128 * 4
+local expected_size = 256 * 16 * 4
 local fs = {
     info = function(path)
         if path == source then return { size = 100, mtime = 1, is_file = true, is_dir = false } end
@@ -65,7 +66,7 @@ local controller = require("uosc_waveform.controller")
 local app = controller.start({
     mp = mp,
     fs = fs,
-    raw_options = { cache_dir = "/tmp/cache", media_debounce_ms = 0, resize_debounce_ms = 0 },
+    raw_options = { cache_dir = "/tmp/cache", media_debounce_ms = 0, resize_debounce_ms = 0, source_width = 256, source_height = 16, generation_timeout_seconds = 0 },
     context = { config_dir = "/tmp", platform = "other" },
     uosc_config = { controls_size = 0 },
     uosc_detected = true,
@@ -79,9 +80,7 @@ local filter
 for i, value in ipairs(argv) do if value == "-filter_complex" then filter = argv[i + 1] end end
 assert(filter and filter:find("%[0:1%]"), "audio-only file with cover art must map the audio ff-index")
 
-local temp = app:debug_state().active_temp
-files[temp] = string.rep("\0", expected_size)
-async_callbacks[1].callback(true, { status = 0, success = true }, nil)
+async_callbacks[1].callback(true, { status = 0, success = true, stdout = peak_metadata(256, 10), stderr = "" }, nil)
 local final = app:debug_state()
 assert(final.state == "READY_VISIBLE", "audio-only waveform must become visible on uosc seekbar")
 assert(final.raw ~= nil, "audio-only waveform must publish a cache payload")

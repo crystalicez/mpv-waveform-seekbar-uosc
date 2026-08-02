@@ -2,6 +2,7 @@ local root = assert(arg[1], "source root required")
 package.path = root .. "/portable_config/scripts/?.lua;" .. root .. "/portable_config/scripts/?/init.lua;" .. package.path
 
 local events, timers = {}, {}
+local cache = require("uosc_waveform.cache")
 local source = [[C:\Media\clip.mkv]]
 local props = {
     path = source, ["stream-open-filename"] = source, duration = 10, aid = 1, edition = 0,
@@ -67,6 +68,8 @@ assert(#timers >= 1, "waiting state must schedule a lock poll")
 
 -- Peer finishes between polls: valid canonical cache appears and lock disappears.
 files[paths.raw]={size=256*16*4,content=string.rep("x",256*16*4)}
+local meta=cache.manifest_content(paths,256*16*4,{created=now,width=256,height=16})
+files[paths.meta]={size=#meta,content=meta}
 files[paths.lock]=nil
 fs.create_exclusive=original_create
 local poll=timers[#timers]

@@ -27,10 +27,12 @@ package.preload["uosc_waveform.cache"] = function()
         identity = function() return "identity" end,
         paths = function() return { key="key", raw="raw", temp="tmp", lock="lock" } end,
         validate = function(_, path) validate_calls = validate_calls + 1; return path == "raw" end,
+        validate_entry = function() validate_calls = validate_calls + 1; return true end,
         lock_status = function() return "free" end,
         acquire_lock = function() return false, "disabled" end,
         stale_auxiliary_candidates = function() return {} end,
         cleanup_candidates = function() return {} end,
+        cleanup_groups = function() return {} end,
         remove_owned_lock = function() return true end,
     }
 end

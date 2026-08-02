@@ -1,0 +1,20 @@
+local root = assert(arg[1], "source root required")
+local metadata_path = assert(arg[2], "metadata path required")
+local output_path = assert(arg[3], "output path required")
+local duration = assert(tonumber(arg[4]), "duration required")
+local width = assert(tonumber(arg[5]), "width required")
+local height = assert(tonumber(arg[6]), "height required")
+local color = arg[7] or "#F2F2F2"
+local opacity = tonumber(arg[8]) or 0.38
+package.path = root .. "/portable_config/scripts/?.lua;" .. root .. "/portable_config/scripts/?/init.lua;" .. package.path
+local waveform = require("uosc_waveform.waveform")
+local input = assert(io.open(metadata_path, "rb"))
+local text = input:read("*a")
+input:close()
+local peaks, parse_error = waveform.parse_peak_metadata(text, duration, width)
+assert(peaks, parse_error)
+local bgra, render_error = waveform.render_bgra(peaks, width, height, color, opacity)
+assert(bgra, render_error)
+local output = assert(io.open(output_path, "wb"))
+assert(output:write(bgra))
+output:close()

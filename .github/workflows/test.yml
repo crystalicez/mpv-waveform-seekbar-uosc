@@ -1,0 +1,80 @@
+name: test
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lua:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - package: lua5.2
+            executable: lua5.2
+          - package: lua5.4
+            executable: lua5.4
+          - package: luajit
+            executable: luajit
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install runtime
+        run: sudo apt-get update && sudo apt-get install -y ${{ matrix.package }} ffmpeg python3
+      - name: Run complete suite
+        env:
+          LUA_BIN: ${{ matrix.executable }}
+        run: tools/run-tests.sh
+      - name: Upload failure logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-logs-${{ matrix.executable }}
+          path: |
+            *.log
+            dist/*verification.txt
+          if-no-files-found: ignore
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Lua and FFmpeg
+        shell: powershell
+        run: choco install lua ffmpeg -y --no-progress
+      - name: Run Windows suite
+        shell: powershell
+        env:
+          LUA_BIN: lua.exe
+        run: tools/run-tests.ps1
+      - name: Upload failure logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-logs-windows
+          path: |
+            *.log
+            dist/*verification.txt
+          if-no-files-found: ignore
+
+  package:
+    needs: [lua, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install release dependencies
+        run: sudo apt-get update && sudo apt-get install -y lua5.4 ffmpeg python3
+      - name: Verify source
+        env:
+          LUA_BIN: lua5.4
+        run: tools/run-tests.sh
+      - name: Build deterministic release
+        run: python3 tools/package-release.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: uosc-waveform-release
+          path: dist/

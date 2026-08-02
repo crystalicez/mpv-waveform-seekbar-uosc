@@ -1,4 +1,4 @@
-local SCRIPT_VERSION = "0.2.2"
+local SCRIPT_VERSION = "0.3.0"
 
 local function resolve_script_directory()
     local packaged = mp.get_script_directory and mp.get_script_directory() or nil
@@ -113,8 +113,9 @@ local function create_exclusive(path, content, created)
     if existing then return false, err or "exists" end
     if windows then
         local owner = tostring(content or ""):match("owner=([^\r\n]+)") or "unknown"
+        local pid = tonumber(tostring(content or ""):match("pid=(%d+)")) or 0
         local inherited_env = utils.get_env_list and utils.get_env_list() or {}
-        local spec = windows_lock.command_spec(path, created, owner, inherited_env)
+        local spec = windows_lock.command_spec(path, created, owner, pid, inherited_env)
         return subprocess(spec.args, { env = spec.env })
     end
     return false, err or "exists"
@@ -136,6 +137,18 @@ end
 function fs.size(path) local info = fs.info(path); return info and info.size or nil end
 function fs.mtime(path) local info = fs.info(path); return info and info.mtime or nil end
 function fs.exists(path) return fs.info(path) ~= nil end
+function fs.process_alive(pid)
+    pid = tonumber(pid)
+    if not pid or pid <= 0 then return false end
+    if windows then
+        local inherited_env = utils.get_env_list and utils.get_env_list() or {}
+        local spec = windows_lock.process_alive_command_spec(pid, inherited_env)
+        local ok = subprocess(spec.args, { env = spec.env })
+        return ok == true
+    end
+    local ok = subprocess({ "kill", "-0", tostring(math.floor(pid)) })
+    return ok == true
+end
 function fs.read(path) return read_binary(path) end
 function fs.write(path, content) return write_binary(path, content) end
 function fs.create_exclusive(path, content, created) return create_exclusive(path, content, created) end
@@ -257,6 +270,7 @@ local instance = controller.start({
     fs = fs,
     now = os.time,
     session_id = session_id,
+    process_id = process_id,
     raw_options = raw_options,
     context = { config_dir = config_directory, platform = windows and "windows" or "other" },
     uosc_config = uosc_config,

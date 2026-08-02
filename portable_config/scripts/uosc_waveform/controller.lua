@@ -5,6 +5,7 @@ local media = require("uosc_waveform.media")
 local options = require("uosc_waveform.options")
 local overlay = require("uosc_waveform.overlay")
 local util = require("uosc_waveform.util")
+local waveform = require("uosc_waveform.waveform")
 
 local M = {}
 
@@ -54,7 +55,7 @@ function M.start(deps)
         uosc_raw.compatibility = opts.compatibility
     end
     local uosc_config, geometry_warnings = geometry.parse_uosc(uosc_raw)
-    local renderer = overlay.new(mp, opts)
+    local renderer = nil
 
     local app = {}
     local enabled = opts.enabled
@@ -63,6 +64,9 @@ function M.start(deps)
     local token = 0
     local active_job = nil
     local active_attempt = nil
+    local generation_phase = nil
+    local generation_watchdog_timer = nil
+    local last_error = nil
     local geometry_timer = nil
     local mouse_timer = nil
     local cursor_fade_timer = nil
@@ -83,8 +87,65 @@ function M.start(deps)
     local owned_lock = nil
     local active_temp = nil
     local attempt_serial = 0
-    local cleanup_performed = false
+    local last_cache_cleanup_at = nil
+    local published_since_cleanup = 0
+    local CACHE_CLEANUP_ENTRY_INTERVAL = 8
+    local CACHE_CLEANUP_MIN_INTERVAL = 600
     local shutdown = false
+    local observed_callbacks = {}
+    local event_callbacks = {}
+    local script_message_names = {}
+    local key_binding_names = {}
+    local registrations_removed = false
+
+    local function unregister_all()
+        if registrations_removed then return end
+        registrations_removed = true
+        if mp.unobserve_property then
+            for _, callback in ipairs(observed_callbacks) do
+                pcall(mp.unobserve_property, callback)
+            end
+        end
+        if mp.unregister_event then
+            for _, callback in ipairs(event_callbacks) do
+                pcall(mp.unregister_event, callback)
+            end
+        end
+        if mp.unregister_script_message then
+            for _, name in ipairs(script_message_names) do
+                pcall(mp.unregister_script_message, name)
+            end
+        end
+        if mp.remove_key_binding then
+            for _, name in ipairs(key_binding_names) do
+                pcall(mp.remove_key_binding, name)
+            end
+        end
+    end
+
+    local function observe_property(name, kind, callback)
+        if not mp.observe_property then return end
+        observed_callbacks[#observed_callbacks + 1] = callback
+        mp.observe_property(name, kind, callback)
+    end
+
+    local function register_event(name, callback)
+        if not mp.register_event then return end
+        event_callbacks[#event_callbacks + 1] = callback
+        mp.register_event(name, callback)
+    end
+
+    local function register_script_message(name, callback)
+        if not mp.register_script_message then return end
+        script_message_names[#script_message_names + 1] = name
+        mp.register_script_message(name, callback)
+    end
+
+    local function add_key_binding(key, name, callback)
+        if not mp.add_key_binding then return end
+        key_binding_names[#key_binding_names + 1] = name
+        mp.add_key_binding(key, name, callback)
+    end
 
     local log_ranks = { error = 1, warn = 2, info = 3, debug = 4 }
     local configured_log_rank = log_ranks[opts.log_level] or log_ranks.warn
@@ -107,6 +168,28 @@ function M.start(deps)
     for _, warning in ipairs(option_warnings) do log("warn", warning) end
     for _, warning in ipairs(geometry_warnings) do log("warn", warning) end
 
+    local function concise_detail(value)
+        local text = tostring(value or ""):gsub("[\r\n]+", " "):gsub("%s+", " ")
+        text = text:match("^%s*(.-)%s*$")
+        if #text > 240 then text = text:sub(1, 237) .. "..." end
+        return text
+    end
+
+    local function clear_error()
+        last_error = nil
+    end
+
+    local function set_error(code, detail)
+        generation_phase = nil
+        state = STATES.ERROR
+        last_error = {
+            code = tostring(code or "unknown-error"),
+            detail = concise_detail(detail),
+            at = tonumber(now()) or 0,
+        }
+        log("warn", last_error.code .. (last_error.detail ~= "" and (":" .. last_error.detail) or ""))
+    end
+
     local function get_native(name, default)
         if mp.get_property_native then
             local value = mp.get_property_native(name, default)
@@ -114,6 +197,55 @@ function M.start(deps)
         end
         return default
     end
+
+    local OWNER_PROPERTY = "user-data/uosc-waveform/owner"
+    local owns_instance_property = false
+    if mp.set_property_native then
+        local existing_owner = tostring(get_native(OWNER_PROPERTY, "") or "")
+        if existing_owner ~= "" and existing_owner ~= session_id then
+            enabled = false
+            state = STATES.ERROR
+            unsupported_reason = nil
+            last_error = {
+                code = "duplicate-instance",
+                detail = "owner=" .. existing_owner,
+                at = tonumber(now()) or 0,
+            }
+            log("warn", "duplicate-instance:owner=" .. existing_owner)
+
+            function app:toggle() end
+            function app:show_status()
+                local details = string.format(
+                    "uosc-waveform %s\nstate=%s\nphase=none\nreason=none\nerror=%s\ndetail=%s\nconfig=%s\nuosc_file=%s\nlog=%s",
+                    tostring(deps.script_version or "unknown"), tostring(state),
+                    tostring(last_error.code), tostring(last_error.detail),
+                    tostring(context.config_dir or ""), tostring(uosc_detected),
+                    tostring(deps.diagnostic_path or "disabled")
+                )
+                if mp.osd_message then mp.osd_message(details, 8) end
+                return details
+            end
+            function app:shutdown() shutdown = true end
+            function app:debug_state()
+                return {
+                    state = state,
+                    enabled = false,
+                    unsupported_reason = nil,
+                    generation_phase = nil,
+                    last_error = util.shallow_copy(last_error),
+                }
+            end
+            return app
+        end
+        local ok, result = pcall(mp.set_property_native, OWNER_PROPERTY, session_id)
+        if ok and result ~= false then
+            owns_instance_property = true
+        else
+            log("warn", "ownership-claim-failed:" .. concise_detail(result))
+        end
+    end
+
+    renderer = overlay.new(mp, opts)
 
     local geometry_values = {}
     local GEOMETRY_MISSING = {}
@@ -195,7 +327,14 @@ function M.start(deps)
         if timer and timer.kill then timer:kill() end
     end
 
+    local function cancel_generation_watchdog()
+        cancel_timer(generation_watchdog_timer)
+        generation_watchdog_timer = nil
+    end
+
     local function cancel_active_generation()
+        cancel_generation_watchdog()
+        generation_phase = nil
         active_attempt = nil
         if active_job and not active_job:done() then
             active_job:cancel()
@@ -246,28 +385,55 @@ function M.start(deps)
         if ephemeral and raw and fs.remove then fs.remove(raw) end
     end
 
+    local function current_raw_valid()
+        if not current_raw then return false, "missing" end
+        if current_ephemeral then return cache.validate(fs, current_raw, expected_size) end
+        if paths and current_raw == paths.raw then
+            return cache.validate_entry(fs, paths, expected_size)
+        end
+        return cache.validate(fs, current_raw, expected_size)
+    end
+
     local function cleanup_cache()
-        if cleanup_performed or not fs.list then return end
-        cleanup_performed = true
+        if not fs.list then return false end
+        local cleanup_now = tonumber(now()) or 0
         local entries = fs.list(opts.cache_dir) or {}
         local protected = {}
         if current_raw then protected[current_raw] = true end
-        if paths then protected[paths.lock] = true end
+        if paths then
+            for _, protected_value in ipairs({ paths.key, paths.raw, paths.meta, paths.lock }) do
+                if protected_value then protected[protected_value] = true end
+            end
+        end
         if active_temp then protected[active_temp] = true end
         for _, path in ipairs(cache.stale_auxiliary_candidates(
-            entries, now(), opts.stale_lock_seconds, protected
+            entries, cleanup_now, opts.stale_lock_seconds, protected
         )) do
             if fs.remove then fs.remove(path) end
         end
-        local candidates = cache.cleanup_candidates(
+        for _, group in ipairs(cache.cleanup_groups(
             entries,
-            now(),
+            cleanup_now,
             opts.max_cache_age_days * 86400,
-            opts.max_cache_mb * 1024 * 1024
-        )
-        for _, path in ipairs(candidates) do
-            if path ~= current_raw and fs.remove then fs.remove(path) end
+            opts.max_cache_mb * 1024 * 1024,
+            protected
+        )) do
+            for _, path in ipairs(group.paths) do
+                if not protected[path] and fs.remove then fs.remove(path) end
+            end
         end
+        last_cache_cleanup_at = cleanup_now
+        published_since_cleanup = 0
+        return true
+    end
+
+    local function maybe_cleanup_cache(published)
+        if published then published_since_cleanup = published_since_cleanup + 1 end
+        local current_time = tonumber(now()) or 0
+        local due = last_cache_cleanup_at == nil
+            or published_since_cleanup >= CACHE_CLEANUP_ENTRY_INTERVAL
+            or current_time - last_cache_cleanup_at >= CACHE_CLEANUP_MIN_INTERVAL
+        if due then cleanup_cache() end
     end
 
     function app:refresh_geometry(reason)
@@ -295,20 +461,23 @@ function M.start(deps)
             end
             return true
         end
-        state = STATES.ERROR
-        local valid, validation_reason = cache.validate(fs, current_raw, expected_size)
+        local valid, validation_reason = current_raw_valid()
         if not valid then
+            local invalid_raw = current_raw
+            local invalid_ephemeral = current_ephemeral
             current_raw = nil
             current_ephemeral = false
+            if invalid_ephemeral and invalid_raw and fs.remove then fs.remove(invalid_raw) end
             log("warn", "overlay-cache-invalid:" .. tostring(validation_reason or "missing"))
             app:refresh_media("overlay-cache-invalid")
             return false
         end
-        log("warn", "overlay-add-failed:command-failed")
+        set_error("overlay-add-failed", "command-failed")
         return false
     end
 
     local function schedule_geometry(reason)
+        if shutdown or not enabled then return end
         cancel_timer(geometry_timer)
         geometry_timer = nil
         if opts.resize_debounce_ms <= 0 or not mp.add_timeout then
@@ -317,6 +486,7 @@ function M.start(deps)
         end
         geometry_timer = mp.add_timeout(opts.resize_debounce_ms / 1000, function()
             geometry_timer = nil
+            if shutdown or not enabled then return end
             app:refresh_geometry(reason)
         end)
     end
@@ -324,15 +494,19 @@ function M.start(deps)
     -- uosc derives timeline visibility directly from cursor proximity. Mouse
     -- movement therefore needs a render-rate throttle, not the much slower
     -- resize debounce used for window geometry changes.
-    local function schedule_mouse_geometry(reason)
+    local function schedule_mouse_geometry(reason, after_refresh)
+        if shutdown or not enabled then return end
         if opts.mouse_update_interval_ms <= 0 or not mp.add_timeout then
             app:refresh_geometry(reason)
+            if after_refresh and enabled and not shutdown then after_refresh() end
             return
         end
         if mouse_timer then return end
         mouse_timer = mp.add_timeout(opts.mouse_update_interval_ms / 1000, function()
             mouse_timer = nil
+            if shutdown or not enabled then return end
             app:refresh_geometry(reason)
+            if after_refresh and enabled and not shutdown then after_refresh() end
         end)
     end
 
@@ -347,6 +521,7 @@ function M.start(deps)
     -- exponential tween helper. The decay is chosen so 99% of the distance is
     -- covered in animation_duration at the configured render interval.
     local function start_cursor_leave_fade()
+        if shutdown or not enabled then return end
         cancel_cursor_fade()
         local from = util.clamp(tonumber(last_visibility) or 0, 0, 1)
         if from <= 0 then
@@ -425,6 +600,7 @@ function M.start(deps)
     end
 
     local function queue_cursor_autohide()
+        if shutdown or not enabled then return end
         cancel_cursor_autohide()
         if not cursor_autohide_allowed() then return end
         local timeout_ms = parse_cursor_autohide(geometry_value("cursor-autohide", 1000))
@@ -439,11 +615,14 @@ function M.start(deps)
     local function handle_mouse_geometry(mouse)
         mouse = mouse or get_native("mouse-pos", {}) or {}
         last_mouse = mouse
+        if shutdown or not enabled then return end
         local hover = mouse.hover ~= false
         if last_mouse_hover == nil then last_mouse_hover = hover end
         if not hover and last_mouse_hover then
             last_mouse_hover = false
             cursor_autohidden = false
+            cancel_timer(mouse_timer)
+            mouse_timer = nil
             cancel_cursor_autohide()
             start_cursor_leave_fade()
             return
@@ -458,19 +637,20 @@ function M.start(deps)
         else
             last_mouse_hover = hover
         end
-        schedule_mouse_geometry("property:mouse-pos")
-        if hover then queue_cursor_autohide() end
+        schedule_mouse_geometry("property:mouse-pos", hover and queue_cursor_autohide or nil)
     end
 
-    local function show_ready(raw_path, reason, ephemeral)
+    local function show_ready(raw_path, reason, ephemeral, published)
         if current_ephemeral and current_raw and current_raw ~= raw_path and fs.remove then
             fs.remove(current_raw)
         end
+        generation_phase = nil
+        clear_error()
         current_raw = raw_path
         current_ephemeral = ephemeral == true
         state = STATES.READY_HIDDEN
         app:refresh_geometry(reason)
-        cleanup_cache()
+        maybe_cleanup_cache(published == true)
     end
 
     local function wait_for_lock(refresh_token)
@@ -483,11 +663,30 @@ function M.start(deps)
     end
 
     local function failure_detail(result)
-        for _, value in ipairs({ result.error_string, result.stderr, result.stdout }) do
+        for _, key in ipairs({ "error_string", "stderr", "stdout" }) do
+            local value = result and result[key]
             local text = value ~= nil and tostring(value) or ""
             if text ~= "" then return text end
         end
-        return "status=" .. tostring(result.status)
+        return "status=" .. tostring(result and result.status)
+    end
+
+    local function arm_generation_watchdog(attempt)
+        cancel_generation_watchdog()
+        local timeout_seconds = tonumber(opts.generation_timeout_seconds) or 0
+        if timeout_seconds <= 0 or not mp.add_timeout then return end
+        generation_watchdog_timer = mp.add_timeout(timeout_seconds, function()
+            generation_watchdog_timer = nil
+            if shutdown or active_attempt ~= attempt then return end
+            attempt.timed_out = true
+            if active_job and not active_job:done() then active_job:cancel() end
+            active_job = nil
+            active_attempt = nil
+            if active_temp and fs.remove then fs.remove(active_temp) end
+            active_temp = nil
+            remove_owned_lock()
+            set_error("generation-timeout", string.format("FFmpeg exceeded %d seconds", timeout_seconds))
+        end)
     end
 
     local function launch_generation(refresh_token, info, color, generation_paths, force_audio_ordinal)
@@ -495,20 +694,21 @@ function M.start(deps)
         local attempt_temp = generation_paths.temp:gsub("%.tmp$", "")
             .. "." .. tostring(refresh_token) .. "." .. tostring(attempt_serial) .. ".tmp"
         local built, argv = pcall(
-            ffmpeg.build_generate_argv,
-            opts.ffmpeg_path, info, opts, attempt_temp, color, force_audio_ordinal
+            ffmpeg.build_peak_argv,
+            opts.ffmpeg_path, info, opts, force_audio_ordinal
         )
         if not built then
             remove_owned_lock()
-            state = STATES.ERROR
-            log("warn", "generation-build-failed:" .. tostring(argv))
+            set_error("generation-build-failed", argv)
             return
         end
+        clear_error()
         state = STATES.GENERATING
+        generation_phase = "analyzing"
         log("debug", "generation-started:" .. generation_paths.key
             .. (force_audio_ordinal and ":ordinal-fallback" or ":ff-index"))
 
-        local attempt = { temp = attempt_temp }
+        local attempt = { temp = attempt_temp, timed_out = false }
         active_attempt = attempt
         active_temp = attempt_temp
         local job = ffmpeg.start(mp, argv, function(result)
@@ -516,69 +716,135 @@ function M.start(deps)
                 if fs.remove then fs.remove(attempt.temp) end
                 return
             end
+            cancel_generation_watchdog()
             active_attempt = nil
             active_job = nil
-            active_temp = nil
             local completed_paths = util.shallow_copy(generation_paths)
             completed_paths.temp = attempt.temp
             if result.killed then
                 if fs.remove then fs.remove(completed_paths.temp) end
+                active_temp = nil
                 remove_owned_lock()
+                generation_phase = nil
                 return
             end
             if result.status ~= 0 or result.success == false then
                 if fs.remove then fs.remove(completed_paths.temp) end
+                active_temp = nil
                 local can_retry_ordinal = not force_audio_ordinal
                     and info.track and info.track.ff_index ~= nil
                     and info.track.audio_ordinal ~= nil
                     and ffmpeg.is_stream_mapping_error(result)
                 if can_retry_ordinal then
                     log("warn", "ff-index-mapping-failed; retrying-audio-ordinal")
+                    generation_phase = nil
                     launch_generation(refresh_token, info, color, generation_paths, true)
                     return
                 end
                 remove_owned_lock()
-                state = STATES.ERROR
-                log("warn", "generation-failed:" .. failure_detail(result))
+                if ffmpeg.is_feature_unsupported(result) then
+                    set_error("ffmpeg-feature-unsupported", failure_detail(result))
+                else
+                    set_error("generation-failed", failure_detail(result))
+                end
                 return
             end
+
             local after = media.inspect(media_snapshot(), fs)
             if not metadata_matches(info, after) then
                 if fs.remove then fs.remove(completed_paths.temp) end
+                active_temp = nil
                 remove_owned_lock()
+                generation_phase = nil
+                unsupported_reason = "source-changed-during-generation"
                 state = STATES.UNSUPPORTED
-                log("warn", "source-changed-during-generation")
+                log("warn", unsupported_reason)
                 return
             end
-            local published, publish_error = cache.publish(fs, completed_paths.temp, completed_paths.raw, expected_size)
+
+            generation_phase = "rendering"
+            local peaks, parse_error = waveform.parse_peak_metadata(result.stdout, info.duration, opts.source_width)
+            if not peaks then
+                if fs.remove then fs.remove(completed_paths.temp) end
+                active_temp = nil
+                remove_owned_lock()
+                set_error("peak-parse-failed", parse_error)
+                return
+            end
+            local raw, render_error = waveform.render_bgra(
+                peaks, opts.source_width, opts.source_height, color, opts.opacity
+            )
+            peaks = nil
+            if not raw then
+                if fs.remove then fs.remove(completed_paths.temp) end
+                active_temp = nil
+                remove_owned_lock()
+                set_error("bitmap-render-failed", render_error)
+                return
+            end
+            if not fs.write then
+                active_temp = nil
+                remove_owned_lock()
+                set_error("cache-temp-write-failed", "write-unavailable")
+                return
+            end
+            local wrote, write_error = fs.write(completed_paths.temp, raw, now())
+            raw = nil
+            if wrote == false then
+                if fs.remove then fs.remove(completed_paths.temp) end
+                active_temp = nil
+                remove_owned_lock()
+                set_error("cache-temp-write-failed", write_error)
+                return
+            end
+            local temporary_valid, temporary_reason = cache.validate(fs, completed_paths.temp, expected_size)
+            if not temporary_valid then
+                if fs.remove then fs.remove(completed_paths.temp) end
+                active_temp = nil
+                remove_owned_lock()
+                set_error("cache-temp-invalid", temporary_reason)
+                return
+            end
+
+            generation_phase = "publishing"
+            local published, publish_error, fallback_path = cache.publish_entry(
+                fs, completed_paths, completed_paths.temp, expected_size,
+                { created = now(), width = opts.source_width, height = opts.source_height }
+            )
             remove_owned_lock()
             if not published then
-                local winner = cache.validate(fs, completed_paths.raw, expected_size)
+                local winner = cache.validate_entry(fs, completed_paths, expected_size)
                 if winner then
+                    active_temp = nil
                     log("debug", "cache-publish-race-won-by-peer:" .. completed_paths.key)
                     show_ready(completed_paths.raw, "peer-publish")
                     return
                 end
-                local temporary_valid = cache.validate(fs, completed_paths.temp, expected_size)
-                if temporary_valid then
+                local fallback_valid = fallback_path and cache.validate(fs, fallback_path, expected_size)
+                if fallback_valid then
+                    active_temp = nil
                     log("warn", "cache-publish-failed:" .. tostring(publish_error)
-                        .. "; using-session-temp")
-                    show_ready(completed_paths.temp, "session-temp", true)
+                        .. "; using-session-fallback")
+                    show_ready(fallback_path, "session-fallback", true)
                     return
                 end
-                state = STATES.ERROR
-                log("warn", "cache-publish-failed:" .. tostring(publish_error))
+                active_temp = nil
+                set_error("cache-publish-failed", publish_error)
                 return
             end
+            active_temp = nil
             log("debug", "generation-complete:" .. completed_paths.key)
-            show_ready(completed_paths.raw, "generation-complete")
+            show_ready(completed_paths.raw, "generation-complete", false, true)
         end)
-        if active_attempt == attempt and not job:done() then active_job = job end
+        if active_attempt == attempt and not job:done() then
+            active_job = job
+            arm_generation_watchdog(attempt)
+        end
     end
 
     local function start_generation(refresh_token, info, color)
         local generation_paths = paths
-        local lock_ok, lock_error = cache.acquire_lock(fs, generation_paths.lock, now(), session_id)
+        local lock_ok, lock_error = cache.acquire_lock(fs, generation_paths.lock, now(), session_id, deps.process_id)
         if not lock_ok then
             local status = cache.lock_status(fs, generation_paths.lock, now(), opts.stale_lock_seconds)
             if status == "active" then
@@ -594,14 +860,17 @@ function M.start(deps)
             -- With exclusive ownership it is safe to clear a truncated
             -- canonical payload before Windows rename. Without this, an
             -- invalid destination can force session-temp fallback forever.
-            local destination_valid = cache.validate(fs, generation_paths.raw, expected_size)
-            if not destination_valid and fs.exists and fs.exists(generation_paths.raw) and fs.remove then
-                local removed, remove_error = fs.remove(generation_paths.raw)
-                if removed == false then
-                    log("warn", "invalid-cache-remove-failed:" .. tostring(remove_error or generation_paths.raw))
-                else
-                    log("debug", "invalid-cache-removed:" .. tostring(generation_paths.key))
+            local destination_valid = cache.validate_entry(fs, generation_paths, expected_size)
+            if not destination_valid and fs.remove then
+                for _, invalid_path in ipairs({ generation_paths.raw, generation_paths.meta }) do
+                    if fs.exists and fs.exists(invalid_path) then
+                        local removed, remove_error = fs.remove(invalid_path)
+                        if removed == false then
+                            log("warn", "invalid-cache-remove-failed:" .. tostring(remove_error or invalid_path))
+                        end
+                    end
                 end
+                log("debug", "invalid-cache-entry-cleared:" .. tostring(generation_paths.key))
             end
         end
         launch_generation(refresh_token, info, color, generation_paths, false)
@@ -637,6 +906,8 @@ function M.start(deps)
             current_media = nil
             paths = nil
             unsupported_reason = info.reason
+            generation_phase = nil
+            clear_error()
             state = STATES.UNSUPPORTED
             log("debug", "unsupported:" .. tostring(info.reason))
             return
@@ -656,7 +927,7 @@ function M.start(deps)
                 log("debug", "refresh-coalesced:waiting-lock:" .. tostring(reason))
                 return
             end
-            if current_raw and cache.validate(fs, current_raw, expected_size) then
+            if current_raw and current_raw_valid() then
                 app:refresh_geometry(reason or "same-media")
                 return
             end
@@ -672,12 +943,11 @@ function M.start(deps)
         paths = cache.paths(opts.cache_dir, current_identity, session_id)
         local mkdir_ok, mkdir_error = call_if(fs, "mkdir", opts.cache_dir)
         if mkdir_ok == false then
-            state = STATES.ERROR
-            log("warn", "cache-directory-create-failed:" .. tostring(mkdir_error or opts.cache_dir))
+            set_error("cache-directory-create-failed", mkdir_error or opts.cache_dir)
             return
         end
 
-        local hit = cache.validate(fs, paths.raw, expected_size)
+        local hit = cache.validate_entry(fs, paths, expected_size)
         if hit then
             log("debug", "cache-hit:" .. paths.key)
             show_ready(paths.raw, reason or "cache-hit")
@@ -697,6 +967,12 @@ function M.start(deps)
         if enabled then
             enabled = false
             cancel_active_generation()
+            cancel_timer(media_timer)
+            media_timer = nil
+            cancel_timer(geometry_timer)
+            geometry_timer = nil
+            cancel_timer(mouse_timer)
+            mouse_timer = nil
             cancel_cursor_fade()
             cancel_cursor_autohide()
             renderer:hide()
@@ -705,7 +981,7 @@ function M.start(deps)
         else
             enabled = true
             log("info", "enabled")
-            if current_raw and cache.validate(fs, current_raw, expected_size) then
+            if current_raw and current_raw_valid() then
                 app:refresh_geometry("toggle")
             else
                 app:refresh_media("toggle")
@@ -714,14 +990,20 @@ function M.start(deps)
     end
 
     function app:show_status()
+        local error_code = last_error and last_error.code or "none"
+        local error_detail = last_error and last_error.detail or "none"
         local details = string.format(
-            "uosc-waveform %s\nstate=%s\nreason=%s\nconfig=%s\nuosc_file=%s\nlog=%s",
+            "uosc-waveform %s\nstate=%s\nphase=%s\nreason=%s\nerror=%s\ndetail=%s\nconfig=%s\nuosc_file=%s\nlog=%s",
             tostring(deps.script_version or "unknown"), tostring(state),
-            tostring(unsupported_reason or "none"), tostring(context.config_dir or ""),
+            tostring(generation_phase or "none"), tostring(unsupported_reason or "none"),
+            tostring(error_code), tostring(error_detail), tostring(context.config_dir or ""),
             tostring(uosc_detected), tostring(deps.diagnostic_path or "disabled")
         )
         if mp.osd_message then mp.osd_message(details, 8) end
-        log("info", "status-request state=" .. tostring(state) .. " reason=" .. tostring(unsupported_reason or "none"))
+        log("info", "status-request state=" .. tostring(state)
+            .. " phase=" .. tostring(generation_phase or "none")
+            .. " reason=" .. tostring(unsupported_reason or "none")
+            .. " error=" .. tostring(error_code))
         return details
     end
 
@@ -739,6 +1021,14 @@ function M.start(deps)
         cancel_cursor_autohide()
         renderer:hide()
         clear_current_raw()
+        unregister_all()
+        if owns_instance_property and mp.set_property_native then
+            local current_owner = tostring(get_native(OWNER_PROPERTY, "") or "")
+            if current_owner == session_id then
+                pcall(mp.set_property_native, OWNER_PROPERTY, "")
+            end
+            owns_instance_property = false
+        end
     end
 
     function app:debug_state()
@@ -754,10 +1044,15 @@ function M.start(deps)
             ephemeral = current_ephemeral,
             identity = current_identity,
             unsupported_reason = unsupported_reason,
+            generation_phase = generation_phase,
+            last_error = last_error and util.shallow_copy(last_error) or nil,
+            last_cache_cleanup_at = last_cache_cleanup_at,
+            published_since_cleanup = published_since_cleanup,
         }
     end
 
     local function schedule_media(reason)
+        if shutdown or not enabled then return end
         cancel_timer(media_timer)
         media_timer = nil
         if opts.media_debounce_ms <= 0 or not mp.add_timeout then
@@ -777,11 +1072,11 @@ function M.start(deps)
     }
     for _, property in ipairs(media_observers) do
         local property_name = property
-        if mp.observe_property then
-            mp.observe_property(property_name, "native", function()
-                if not registering_observers then schedule_media("property:" .. property_name) end
-            end)
-        end
+        observe_property(property_name, "native", function()
+            if not registering_observers and enabled and not shutdown then
+                schedule_media("property:" .. property_name)
+            end
+        end)
     end
     local geometry_observers = {
         "osd-width", "osd-height", "osd-dimensions", "display-hidpi-scale", "fullscreen", "window-maximized", "border",
@@ -791,74 +1086,72 @@ function M.start(deps)
     }
     for _, property in ipairs(geometry_observers) do
         local property_name = property
-        if mp.observe_property then
-            mp.observe_property(property_name, "native", function(_, value)
-                if value == nil then value = get_native(property_name) end
-                geometry_values[property_name] = value ~= nil and value or GEOMETRY_MISSING
-                if not registering_observers then
-                    if not cursor_autohide_allowed() then cancel_cursor_autohide() end
-                    schedule_geometry("property:" .. property_name)
-                end
-            end)
+        observe_property(property_name, "native", function(_, value)
+            if value == nil then value = get_native(property_name) end
+            geometry_values[property_name] = value ~= nil and value or GEOMETRY_MISSING
+            if not registering_observers and enabled and not shutdown then
+                if not cursor_autohide_allowed() then cancel_cursor_autohide() end
+                schedule_geometry("property:" .. property_name)
+            end
+        end)
+    end
+    observe_property("mouse-pos", "native", function(_, mouse)
+        if not registering_observers then
+            last_mouse = mouse or last_mouse
+            if enabled and not shutdown then handle_mouse_geometry(mouse) end
         end
-    end
-    if mp.observe_property then
-        mp.observe_property("mouse-pos", "native", function(_, mouse)
-            if not registering_observers then handle_mouse_geometry(mouse) end
-        end)
-        mp.observe_property("touch-pos", "native", function(_, touches)
-            local touch = type(touches) == "table" and touches[1] or nil
-            if not registering_observers and type(touch) == "table" then
-                handle_mouse_geometry({ x = touch.x, y = touch.y, hover = true })
-            end
-        end)
-    end
-    if mp.observe_property then
-        mp.observe_property("background-color", "native", function()
-            if not registering_observers then schedule_media("background-color") end
-        end)
-    end
+    end)
+    observe_property("touch-pos", "native", function(_, touches)
+        local touch = type(touches) == "table" and touches[1] or nil
+        if not registering_observers and enabled and not shutdown and type(touch) == "table" then
+            handle_mouse_geometry({ x = touch.x, y = touch.y, hover = true })
+        end
+    end)
+    observe_property("background-color", "native", function()
+        if not registering_observers and enabled and not shutdown then
+            schedule_media("background-color")
+        end
+    end)
     registering_observers = false
-    if mp.register_event then
-        mp.register_event("file-loaded", function() schedule_media("file-loaded") end)
-        -- `file-loaded` can arrive before selection metadata is fully visible
-        -- for some audio-only containers. `playback-restart` is the stable
-        -- post-initialization retry point and is harmless for already-ready
-        -- media because refresh_media coalesces identical identities.
-        mp.register_event("playback-restart", function()
-            -- Avoid rescanning on every seek. Retry only while initialization
-            -- is blocked by properties that can legitimately settle late.
-            if state == STATES.UNSUPPORTED and (
-                unsupported_reason == "missing-path"
-                or unsupported_reason == "invalid-duration"
-                or unsupported_reason == "no-audio"
-            ) then
-                schedule_media("playback-restart")
-            end
-        end)
-        mp.register_event("end-file", function()
-            token = token + 1
-            cancel_timer(media_timer)
-            media_timer = nil
-            cancel_active_generation()
-            cancel_cursor_fade()
-            cancel_cursor_autohide()
-            renderer:hide()
-            clear_current_raw()
-            current_media = nil
-            current_identity = nil
-            paths = nil
-            last_visibility = 0
-            unsupported_reason = "end-file"
-            state = STATES.UNSUPPORTED
-        end)
-        mp.register_event("shutdown", function() app:shutdown() end)
-    end
-    if mp.register_script_message then mp.register_script_message("uosc-waveform-toggle", function() app:toggle() end) end
-    if mp.add_key_binding then
-        mp.add_key_binding("Alt+w", "uosc-waveform-toggle", function() app:toggle() end)
-        mp.add_key_binding("Alt+Shift+w", "uosc-waveform-status", function() app:show_status() end)
-    end
+
+    register_event("file-loaded", function() schedule_media("file-loaded") end)
+    -- `file-loaded` can arrive before selection metadata is fully visible
+    -- for some audio-only containers. `playback-restart` is the stable
+    -- post-initialization retry point and is harmless for already-ready
+    -- media because refresh_media coalesces identical identities.
+    register_event("playback-restart", function()
+        -- Avoid rescanning on every seek. Retry only while initialization
+        -- is blocked by properties that can legitimately settle late.
+        if state == STATES.UNSUPPORTED and (
+            unsupported_reason == "missing-path"
+            or unsupported_reason == "invalid-duration"
+            or unsupported_reason == "no-audio"
+        ) then
+            schedule_media("playback-restart")
+        end
+    end)
+    register_event("end-file", function()
+        token = token + 1
+        cancel_timer(media_timer)
+        media_timer = nil
+        cancel_active_generation()
+        cancel_cursor_fade()
+        cancel_cursor_autohide()
+        renderer:hide()
+        clear_current_raw()
+        current_media = nil
+        current_identity = nil
+        paths = nil
+        last_visibility = 0
+        unsupported_reason = "end-file"
+        generation_phase = nil
+        clear_error()
+        state = STATES.UNSUPPORTED
+    end)
+    register_event("shutdown", function() app:shutdown() end)
+    register_script_message("uosc-waveform-toggle", function() app:toggle() end)
+    add_key_binding("Alt+w", "uosc-waveform-toggle", function() app:toggle() end)
+    add_key_binding("Alt+Shift+w", "uosc-waveform-status", function() app:show_status() end)
 
     return app
 end

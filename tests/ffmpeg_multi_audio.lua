@@ -14,11 +14,11 @@ local opts = {
 }
 
 local function filter_for(track)
-    local argv = ffmpeg.build_generate_argv("ffmpeg", {
+    local argv = ffmpeg.build_peak_argv("ffmpeg", {
         input_path = [[C:\Media\multi.mkv]],
         duration = 120.25,
         track = track,
-    }, opts, [[C:\Cache\out.tmp]], "#FFFFFF")
+    }, opts, false)
     for index, value in ipairs(argv) do
         if value == "-filter_complex" then return argv[index + 1] end
     end

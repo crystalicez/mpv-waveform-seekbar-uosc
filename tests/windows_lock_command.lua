@@ -10,6 +10,7 @@ local spec = windows_lock.command_spec(
     [[C:\Users\Ice\AppData\Roaming\mpv\cache\uosc-waveform\abc.lock]],
     1785655130,
     "owner with spaces & symbols",
+    4321,
     {
         "PATH=C:\\Windows\\System32",
         "TEMP=C:\\Temp",
@@ -38,6 +39,7 @@ assert(env.MPV_WAVEFORM_LOCK_PATH == [[C:\Users\Ice\AppData\Roaming\mpv\cache\uo
     "must pass the lock path through the environment")
 assert(env.MPV_WAVEFORM_LOCK_CREATED == "1785655130", "must pass the creation timestamp")
 assert(env.MPV_WAVEFORM_LOCK_OWNER == "owner with spaces & symbols", "must pass owner literally")
+assert(env.MPV_WAVEFORM_LOCK_PID == "4321", "must pass process ID")
 
 local path_count, owner_count = 0, 0
 for _, item in ipairs(spec.env) do
