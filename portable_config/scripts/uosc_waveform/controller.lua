@@ -59,6 +59,7 @@ function M.start(deps)
     local app = {}
     local enabled = opts.enabled
     local state = enabled and STATES.UNSUPPORTED or STATES.DISABLED
+    local unsupported_reason = enabled and "not-inspected" or nil
     local token = 0
     local active_job = nil
     local active_attempt = nil
@@ -617,6 +618,7 @@ function M.start(deps)
             current_identity = nil
             current_media = nil
             paths = nil
+            unsupported_reason = nil
             state = STATES.DISABLED
             return
         end
@@ -632,11 +634,13 @@ function M.start(deps)
             current_identity = nil
             current_media = nil
             paths = nil
+            unsupported_reason = info.reason
             state = STATES.UNSUPPORTED
             log("debug", "unsupported:" .. tostring(info.reason))
             return
         end
 
+        unsupported_reason = nil
         local color = options.choose_waveform_color(opts, uosc_raw, get_native("background-color", "#000000"))
         opts.waveform_color = color
         local next_identity = cache.identity(info, opts)
@@ -709,13 +713,13 @@ function M.start(deps)
 
     function app:show_status()
         local details = string.format(
-            "uosc-waveform %s\nstate=%s\nconfig=%s\nuosc_file=%s\nlog=%s",
+            "uosc-waveform %s\nstate=%s\nreason=%s\nconfig=%s\nuosc_file=%s\nlog=%s",
             tostring(deps.script_version or "unknown"), tostring(state),
-            tostring(context.config_dir or ""), tostring(uosc_detected),
-            tostring(deps.diagnostic_path or "disabled")
+            tostring(unsupported_reason or "none"), tostring(context.config_dir or ""),
+            tostring(uosc_detected), tostring(deps.diagnostic_path or "disabled")
         )
         if mp.osd_message then mp.osd_message(details, 8) end
-        log("info", "status-request state=" .. tostring(state))
+        log("info", "status-request state=" .. tostring(state) .. " reason=" .. tostring(unsupported_reason or "none"))
         return details
     end
 
@@ -747,6 +751,7 @@ function M.start(deps)
             raw = current_raw,
             ephemeral = current_ephemeral,
             identity = current_identity,
+            unsupported_reason = unsupported_reason,
         }
     end
 
@@ -814,6 +819,21 @@ function M.start(deps)
     registering_observers = false
     if mp.register_event then
         mp.register_event("file-loaded", function() schedule_media("file-loaded") end)
+        -- `file-loaded` can arrive before selection metadata is fully visible
+        -- for some audio-only containers. `playback-restart` is the stable
+        -- post-initialization retry point and is harmless for already-ready
+        -- media because refresh_media coalesces identical identities.
+        mp.register_event("playback-restart", function()
+            -- Avoid rescanning on every seek. Retry only while initialization
+            -- is blocked by properties that can legitimately settle late.
+            if state == STATES.UNSUPPORTED and (
+                unsupported_reason == "missing-path"
+                or unsupported_reason == "invalid-duration"
+                or unsupported_reason == "no-audio"
+            ) then
+                schedule_media("playback-restart")
+            end
+        end)
         mp.register_event("end-file", function()
             token = token + 1
             cancel_timer(media_timer)
@@ -827,6 +847,7 @@ function M.start(deps)
             current_identity = nil
             paths = nil
             last_visibility = 0
+            unsupported_reason = "end-file"
             state = STATES.UNSUPPORTED
         end)
         mp.register_event("shutdown", function() app:shutdown() end)

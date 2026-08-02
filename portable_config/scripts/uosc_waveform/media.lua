@@ -114,6 +114,22 @@ local function selected_audio(snapshot)
         end
     end
     if first_selected then return first_selected, audio_ordinal_for(tracks, first_selected) end
+
+    -- Some audio-only containers expose the track list before mpv has filled
+    -- in `aid`, `selected`, and `main-selection`. When automatic selection is
+    -- still settling and there is exactly one audio track, it is unambiguous
+    -- and safe to use that track. Explicit `aid=no` was handled above, and an
+    -- explicit numeric aid that does not match must remain unsupported.
+    if aid == nil or aid == "auto" then
+        local only_audio
+        for _, track in ipairs(tracks) do
+            if track.type == "audio" then
+                if only_audio then return nil end
+                only_audio = track
+            end
+        end
+        if only_audio then return only_audio, audio_ordinal_for(tracks, only_audio) end
+    end
     return nil
 end
 
