@@ -7,6 +7,8 @@ The waveform follows uosc's seekbar geometry and mouse-proximity animation. uosc
 > Current stable release: **v0.3.0**  
 > Primary supported platform: **Windows 10/11**
 
+![](example.png)
+
 ## Highlights
 
 - Full-track waveform for video and audio-only files
