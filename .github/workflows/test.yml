@@ -43,17 +43,25 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install Lua and FFmpeg
+      # Chocolatey's community V2 package feed can return HTTP 503 for
+      # Lua/FFmpeg and old CRT dependencies. Use independent setup sources.
+      - name: Configure MSVC for Lua
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
+      - name: Install Lua 5.1
+        uses: leafo/gh-actions-lua@6919171ccf181b826f44b9bca76307b577217377 # v13
+        with:
+          luaVersion: "5.1.5"
+      - name: Install FFmpeg
+        uses: FedericoCarboni/setup-ffmpeg@36c6454b5a2348e7794ba2d82a21506605921e3d # v3
+      - name: Verify Windows tools
         shell: powershell
         run: |
-          choco install lua ffmpeg -y --no-progress
-          $lua = Get-ChildItem "${env:ProgramFiles(x86)}\Lua" -Filter lua.exe -Recurse -File | Select-Object -First 1
-          if (-not $lua) { throw "Chocolatey installed Lua but lua.exe was not found" }
-          Add-Content -Path $env:GITHUB_PATH -Value $lua.DirectoryName
+          lua -v
+          ffmpeg -version | Select-Object -First 1
       - name: Run Windows suite
         shell: powershell
         env:
-          LUA_BIN: lua.exe
+          LUA_BIN: lua
         run: tools/run-tests.ps1
       - name: Upload failure logs
         if: failure()
