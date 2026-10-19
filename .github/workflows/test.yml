@@ -65,8 +65,20 @@ jobs:
             dist/*verification.txt
           if-no-files-found: ignore
 
+  native-mpv:
+    runs-on: ubuntu-latest
+    timeout-minutes: 7
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install native mpv and FFmpeg
+        run: sudo apt-get update && sudo apt-get install -y mpv ffmpeg python3
+      - name: Report mpv version
+        run: mpv --version | head -n 2
+      - name: Native multi-instance and crash-recovery smoke
+        run: python3 tests/integration/mpv_native_cache_smoke.py --root .
+
   package:
-    needs: [lua, windows]
+    needs: [lua, windows, native-mpv]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
