@@ -28,7 +28,7 @@ jobs:
       - name: Run complete suite
         env:
           LUA_BIN: ${{ matrix.executable }}
-        run: tools/run-tests.sh
+        run: bash tools/run-tests.sh
       - name: Upload failure logs
         if: failure()
         uses: actions/upload-artifact@v4
@@ -71,7 +71,7 @@ jobs:
       - name: Verify source
         env:
           LUA_BIN: lua5.4
-        run: tools/run-tests.sh
+        run: bash tools/run-tests.sh
       - name: Build deterministic release
         run: python3 tools/package-release.py
       - uses: actions/upload-artifact@v4
