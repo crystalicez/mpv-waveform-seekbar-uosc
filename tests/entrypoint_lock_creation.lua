@@ -4,6 +4,7 @@ package.path = scripts .. "/?.lua;" .. scripts .. "/?/init.lua;" .. package.path
 
 local commands, captured, existing_path = {}, nil, nil
 local execute_real = false
+local simulated_failure = nil
 
 package.preload["mp.utils"] = function()
     return {
@@ -12,6 +13,7 @@ package.preload["mp.utils"] = function()
             return nil
         end,
         readdir = function() return {} end,
+        getpid = function() return 4321 end,
     }
 end
 package.preload["mp.options"] = function()
@@ -39,6 +41,8 @@ _G.mp = {
         if command[1] == "expand-path" then return root end
         assert(command.name == "subprocess" or command._name == "subprocess")
         commands[#commands + 1] = command
+        if simulated_failure == "api-error" then return nil, "simulated-mpv-error" end
+        if simulated_failure == "missing-status" then return {} end
         if execute_real then
             local quoted = {}
             for i, value in ipairs(command.args) do quoted[i] = shell_quote(value) end
@@ -52,6 +56,7 @@ _G.mp = {
 local entry = assert(loadfile(scripts .. "/uosc-waveform.lua"))
 entry()
 local fs = assert(captured and captured.fs, "must capture filesystem adapter")
+assert(captured.process_id == 4321, "entrypoint must use mp.utils.getpid for lock liveness")
 local payload = "created=123\nowner=weird ' $HOME ; ไทย\npid=4321\n"
 local path = "/tmp/waveform test ' $HOME ; [unicode] .lock"
 local windows = package.config:sub(1, 1) == "\\"
@@ -123,6 +128,40 @@ else
     assert(f:read("*a") == payload, "existing POSIX lock must remain untouched")
     f:close()
     assert(os.remove(real_path), "POSIX test lock cleanup")
+
+    -- A hard link publishes without clobbering a concurrent writer's file.
+    local source = real_path .. ".tmp"
+    local destination = real_path .. ".bgra"
+    local function put(file_path, value)
+        local file = assert(io.open(file_path, "wb"))
+        assert(file:write(value))
+        file:close()
+    end
+    put(source, "ours")
+    put(destination, "peer")
+    local published = fs.rename_noreplace(source, destination)
+    assert(not published, "existing destination must reject POSIX publish")
+    local file = assert(io.open(destination, "rb"))
+    assert(file:read("*a") == "peer", "failed publish must preserve the peer's bytes")
+    file:close()
+    assert(os.remove(destination))
+    assert(fs.rename_noreplace(source, destination), "first publisher must succeed")
+    file = assert(io.open(destination, "rb"))
+    assert(file:read("*a") == "ours")
+    file:close()
+    assert(not io.open(source, "rb"), "published temp link should be unlinked")
+    assert(os.remove(destination))
 end
 
+for _, mode in ipairs({ "api-error", "missing-status" }) do
+    simulated_failure = mode
+    local ok, err = fs.mkdir(windows and [[C:\Test\cache]] or "/tmp/entrypoint-cache-error")
+    assert(not ok, "mp.command_native API errors and missing subprocess status must fail")
+    if mode == "api-error" then
+        assert(err == "simulated-mpv-error", tostring(err))
+    else
+        assert(err == "status=nil", tostring(err))
+    end
+end
+simulated_failure = nil
 print("PASS entrypoint_lock_creation")

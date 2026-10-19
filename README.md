@@ -260,7 +260,9 @@ The manifest is committed last and records the cache format, key, dimensions, by
 
 The cache format for this release candidate is **6**. Older entries are ignored and regenerated automatically; manual deletion is not required.
 
-Concurrent mpv instances use exclusive generation locks. Locks include the owner session and process ID. After `stale_lock_seconds`, the owner process is checked before a lock can be removed, preventing a normal suspend/wake interval from invalidating a live owner's work. Final cache publication remains race-safe even when locking is unavailable.
+Concurrent mpv instances use exclusive generation locks containing a session owner and process ID. Once `stale_lock_seconds` has elapsed, the lock manager probes the owner PID before classifying the lock as stale; a live owner is not displaced during suspend/wake.
+
+Stale locks are **not automatically unlinked** because another process could replace a stale file between the check and removal. Instead, generation can proceed without lock ownership, and canonical cache publication uses non-replacing operations (atomic hard-link creation on Linux; non-overwriting moves on Windows). If an orphaned `.lock` file remains, close all mpv instances before removing it manually.
 
 ## Runtime states
 

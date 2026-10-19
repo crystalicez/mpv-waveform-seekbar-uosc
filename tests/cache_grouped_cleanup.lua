@@ -31,4 +31,9 @@ groups=cache.cleanup_groups(entries,1000,500,99999,{})
 for _,group in ipairs(groups) do
  for _,path in ipairs(group.paths) do assert(not path:match("%.lock$") and not path:match("%.tmp$")) end
 end
+local peer_key="ffffffffffffffff-256x16"
+local peer_entries=pair(peer_key,1)
+peer_entries[#peer_entries+1]={path="/c/"..peer_key..".lock",size=42,mtime=1}
+assert(#cache.cleanup_groups(peer_entries,10000,1,0,{})==0,
+    "cache with another instance's lock must not be evicted by age or quota")
 print("PASS cache_grouped_cleanup")

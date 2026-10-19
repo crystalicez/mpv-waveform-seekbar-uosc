@@ -173,7 +173,13 @@ local function strip_comment(line)
             if quote == character then quote = nil elseif not quote then quote = character end
         elseif character == "#" and not quote then
             if index == 1 or line:sub(index - 1, index - 1):match("%s") then
-                return line:sub(1, index - 1)
+                -- '#RRGGBB' after '=' is an option value, not a comment,
+                -- including when spaces surround the equals sign.
+                local next_char = line:sub(index + 7, index + 7)
+                local hex_color = line:sub(index + 1, index + 6):match("^%x%x%x%x%x%x$")
+                    and (next_char == "" or next_char:match("%s"))
+                local is_color_value = hex_color and line:sub(1, index - 1):find("=", 1, true)
+                if not is_color_value then return line:sub(1, index - 1) end
             end
         end
     end

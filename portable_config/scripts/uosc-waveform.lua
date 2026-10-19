@@ -66,23 +66,24 @@ local function subprocess(args, extra)
         args = args,
     }
     if extra and extra.env then fields.env = extra.env end
-    local ok, result = pcall(mp.command_native, mpv_compat.named_command(mp, "subprocess", fields))
+    local ok, result, err = pcall(mp.command_native, mpv_compat.named_command(mp, "subprocess", fields))
     if not ok then return false, result end
-    if type(result) == "table" then
-        local status = tonumber(result.status)
-        if status ~= nil and status ~= 0 then
-            local function nonempty(value)
-                if value == nil then return nil end
-                local text = tostring(value)
-                if text == "" then return nil end
-                return text
-            end
-            local detail = nonempty(result.stderr)
-                or nonempty(result.stdout)
-                or nonempty(result.error_string)
-                or ("status=" .. tostring(status))
-            return false, detail
+    -- mp.command_native returns nil, error (without throwing) on API failure.
+    -- A subprocess result also needs an exit status before it is trusted.
+    if type(result) ~= "table" then return false, err or "subprocess-result-missing" end
+    local status = tonumber(result.status)
+    if status ~= 0 then
+        local function nonempty(value)
+            if value == nil then return nil end
+            local text = tostring(value)
+            if text == "" then return nil end
+            return text
         end
+        local detail = nonempty(result.stderr)
+            or nonempty(result.stdout)
+            or nonempty(result.error_string)
+            or ("status=" .. tostring(status))
+        return false, detail
     end
     return true
 end
@@ -184,6 +185,18 @@ function fs.rename(source, destination)
     end
     return false, err
 end
+-- Linux: link(2) fails with EEXIST instead of replacing a peer's file.
+-- The producer's temp file and destination share one cache directory/device.
+-- Windows File.Move already refuses an existing destination.
+function fs.rename_noreplace(source, destination)
+    if windows then return fs.rename(source, destination) end
+    local ok, err = subprocess({ "/bin/ln", "--", source, destination })
+    if not ok then return false, err end
+    -- Once the hard link exists, publication succeeded even if temp cleanup
+    -- fails; stale session temps can be collected separately.
+    fs.remove(source)
+    return true
+end
 function fs.mkdir(path) return ensure_directory(path) end
 function fs.list(directory)
     if not utils.readdir then return {} end
@@ -264,7 +277,10 @@ local function uosc_menu_open()
     local legacy = type(shared) == "table" and shared["uosc-menu-type"] or nil
     return legacy ~= nil and legacy ~= false and legacy ~= ""
 end
-local process_id = mp.get_property_native and mp.get_property_native("pid") or nil
+-- mp.utils.getpid() is the documented mpv Lua process-ID API. A "pid"
+-- property is not guaranteed, and missing PIDs disable live-owner probing.
+local process_id = (utils.getpid and utils.getpid())
+    or (mp.get_property_native and mp.get_property_native("pid") or nil)
 local monotonic_id = mp.get_time and math.floor(mp.get_time() * 1000000) or 0
 local pointer_id = tostring({}):match("0x(%x+)") or "mpv"
 local session_seed = string.format("%d|%s|%d|%s", os.time(), tostring(process_id or "nopid"), monotonic_id, pointer_id)

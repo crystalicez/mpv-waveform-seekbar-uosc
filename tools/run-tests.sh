@@ -55,6 +55,10 @@ while IFS= read -r stress_file; do
   run_case "stress/$(basename "$stress_file" .lua)" "$LUA" "$stress_file" "$ROOT"
 done < <(find "$ROOT/tests/stress" -maxdepth 1 -type f -name '*.lua' | sort)
 
+# Tests the Linux lock and no-replace publication commands against a real
+# filesystem with multiple contenders; mocks cannot prove POSIX race behavior.
+run_case "integration/posix_cache_race" bash "$ROOT/tests/integration/posix_cache_race.sh"
+
 if [[ "${SKIP_FFMPEG_INTEGRATION:-0}" != "1" ]]; then
   if command -v python3 >/dev/null 2>&1 && command -v ffmpeg >/dev/null 2>&1; then
     run_case "integration/ffmpeg_visual_parity" \

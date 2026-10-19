@@ -129,35 +129,55 @@ function M.publish_entry(fs, paths, temp_raw, expected_size, metadata)
         return false, "destination-exists"
     end
 
-    local moved, move_error = fs.rename(temp_raw, paths.raw)
+    -- Publication must never replace a peer's destination on POSIX, where
+    -- ordinary rename() otherwise overwrites existing files atomically.
+    local publish_move = fs.rename_noreplace or fs.rename
+    local moved, move_error = publish_move(temp_raw, paths.raw)
+    local adopted_orphan = false
     if not moved then
         if M.validate_entry(fs, paths, expected_size) then
             if fs.remove then fs.remove(temp_raw) end
             return false, "destination-exists"
         end
-        return false, "raw-publish-failed:" .. tostring(move_error), temp_raw
+        -- Another writer (or a crashed instance) may have published a full
+        -- raw bitmap but not yet committed its manifest. All publishers for
+        -- this key use the same cache identity and dimensions. The raw was
+        -- linked into place only after size validation; complete its missing
+        -- manifest without replacing the peer's raw bytes.
+        if fs.size(paths.raw) == expected_size
+            and fs.read and fs.read(paths.meta) == nil then
+            adopted_orphan = true
+        else
+            return false, "raw-publish-failed:" .. tostring(move_error), temp_raw
+        end
     end
 
     local meta_temp = tostring(temp_raw) .. ".meta.tmp"
     local manifest = M.manifest_content(paths, expected_size, metadata)
     if not fs.write then return false, "meta-write-failed:write-unavailable", paths.raw end
     local wrote, write_error = fs.write(meta_temp, manifest)
-    if wrote == false then
+    if not wrote then
         if fs.remove then fs.remove(meta_temp) end
-        return false, "meta-write-failed:" .. tostring(write_error), paths.raw
+        return false, "meta-write-failed:" .. tostring(write_error),
+            adopted_orphan and temp_raw or paths.raw
     end
-    local meta_moved, meta_error = fs.rename(meta_temp, paths.meta)
+    local meta_moved, meta_error = publish_move(meta_temp, paths.meta)
     if not meta_moved then
         if M.validate_entry(fs, paths, expected_size) then
-            if fs.remove then fs.remove(meta_temp) end
+            if fs.remove then
+                fs.remove(meta_temp)
+                if adopted_orphan then fs.remove(temp_raw) end
+            end
             return false, "destination-exists"
         end
         if fs.remove then fs.remove(meta_temp) end
-        return false, "meta-publish-failed:" .. tostring(meta_error), paths.raw
+        return false, "meta-publish-failed:" .. tostring(meta_error),
+            adopted_orphan and temp_raw or paths.raw
     end
     if not M.validate_entry(fs, paths, expected_size) then
-        return false, "commit-validation-failed", paths.raw
+        return false, "commit-validation-failed", adopted_orphan and temp_raw or paths.raw
     end
+    if adopted_orphan and fs.remove then fs.remove(temp_raw) end
     return true
 end
 
@@ -267,6 +287,14 @@ end
 function M.cleanup_groups(entries, now, max_age_seconds, max_total_bytes, protected)
     protected = protected or {}
     local groups_by_key = {}
+    local locked_keys = {}
+    for _, entry in ipairs(entries or {}) do
+        local path = tostring(entry.path or "")
+        if cache_suffix(path) == ".lock" then
+            local key = basename(path):match("^([%da-fA-F]+%-%d+x%d+)%.lock$")
+            if key then locked_keys[key] = true end
+        end
+    end
     for _, entry in ipairs(entries or {}) do
         local path = tostring(entry.path or "")
         local key = cache_group_key(path)
@@ -279,7 +307,9 @@ function M.cleanup_groups(entries, now, max_age_seconds, max_total_bytes, protec
             group.paths[#group.paths + 1] = path
             group.size = group.size + (tonumber(entry.size) or 0)
             group.mtime = math.max(group.mtime, tonumber(entry.mtime) or 0)
-            if entry.active or protected[key] or protected[path] then group.protected = true end
+            if entry.active or protected[key] or protected[path] or locked_keys[key] then
+                group.protected = true
+            end
         end
     end
     local groups = {}
@@ -336,7 +366,8 @@ function M.publish(fs, temp_path, raw_path, expected_size)
         if fs.remove then fs.remove(temp_path) end
         return false, "destination-exists"
     end
-    local ok, err = fs.rename(temp_path, raw_path)
+    local publish_move = fs.rename_noreplace or fs.rename
+    local ok, err = publish_move(temp_path, raw_path)
     if not ok then
         local winner = M.validate(fs, raw_path, expected_size)
         if winner then
@@ -353,13 +384,27 @@ end
 
 function M.stale_auxiliary_candidates(entries, now, stale_seconds, protected)
     local selected = {}
+    local locked_keys = {}
     protected = protected or {}
     for _, entry in ipairs(entries or {}) do
         local path = tostring(entry.path or "")
+        if cache_suffix(path) == ".lock" then
+            local key = basename(path):match("^([%da-fA-F]+%-%d+x%d+)%.lock$")
+            if key then locked_keys[key] = true end
+        end
+    end
+    for _, entry in ipairs(entries or {}) do
+        local path = tostring(entry.path or "")
+        local suffix = cache_suffix(path)
+        local key = basename(path):match("^([%da-fA-F]+%-%d+x%d+)")
         local mtime = tonumber(entry.mtime) or 0
         local age = mtime > 0 and (tonumber(now) - mtime) or -1
-        if is_cache_auxiliary(path) and not protected[path] and mtime > 0
-            and age >= tonumber(stale_seconds) then
+        -- Time alone is not proof a lock is dead (suspend or a long running
+        -- analysis). Unlinking it after a stale check also races a new owner.
+        -- Until conditional atomic lock reclamation is available, never
+        -- garbage-collect lock files or a locked entry's session temps.
+        if suffix and suffix:match("^%..+%.tmp$") and not locked_keys[key]
+            and not protected[path] and mtime > 0 and age >= tonumber(stale_seconds) then
             selected[#selected + 1] = path
         end
     end

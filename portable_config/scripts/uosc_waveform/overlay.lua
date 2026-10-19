@@ -51,7 +51,8 @@ function M.new(mpv, opts)
             dh = math.floor(rect.height),
         })
         local ok, result = pcall(mpv.command_native, command)
-        if not ok or result == false then return false end
+        -- mp.command_native signals errors as nil, error (not necessarily a throw).
+        if not ok or result == nil or result == false then return false end
         visible = true
         last = current
         return true

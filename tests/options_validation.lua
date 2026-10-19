@@ -19,4 +19,16 @@ local fallback = options.normalize({log_level="verbose", opacity=0/0, source_wid
 assert(fallback.log_level == "warn", "unknown log levels must fail closed to warn")
 assert(fallback.opacity == options.defaults().opacity and fallback.source_width == options.defaults().source_width,
     "NaN/infinite numeric options must not escape normalization")
+local uosc = options.parse_key_value_file([[
+background_color = #FFFFFF
+color = "#abcdef" # explanation
+autohide=yes # inline comment
+# whole-line comment
+]])
+assert(uosc.background_color == "#FFFFFF" and uosc.color == "#abcdef",
+    "hex color option values must survive comment stripping")
+assert(uosc.autohide == "yes", "ordinary comments must still be stripped")
+local auto = options.normalize({}, {config_dir="/tmp",platform="other"})
+assert(options.choose_waveform_color(auto, uosc, "#000000") == auto.light_color,
+    "white uosc background must select dark waveform contrast")
 print("PASS options_validation")

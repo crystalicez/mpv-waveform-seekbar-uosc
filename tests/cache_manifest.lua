@@ -62,4 +62,61 @@ assert(not published and publish_reason:find("meta-publish-failed",1,true) and f
 ok,reason=cache.validate_entry(fs,paths,expected)
 assert(not ok and reason=="missing-meta")
 assert(#files[paths.raw]==expected,"uncommitted canonical raw remains available to current session")
+-- On POSIX the no-replace publisher must be preferred over normal rename.
+-- Simulate a peer making a complete entry between preflight and atomic link.
+files[paths.raw], files[paths.meta] = nil, nil
+files[temp] = string.rep("T", expected)
+local old_rename = fs.rename
+fs.rename = function() error("ordinary rename must not be called when no-replace is supplied") end
+local attempts = 0
+fs.rename_noreplace = function(a, b)
+    attempts = attempts + 1
+    assert(b == paths.raw)
+    files[paths.raw] = string.rep("P", expected)
+    files[paths.meta] = cache.manifest_content(paths, expected, {created=400,width=256,height=16})
+    return false, "exists"
+end
+published,publish_reason=cache.publish_entry(fs,paths,temp,expected,{created=500,width=256,height=16})
+assert(not published and publish_reason=="destination-exists", "no-replace must adopt completed peer")
+assert(attempts==1 and files[paths.raw]:sub(1,1)=="P" and files[temp]==nil,
+    "failed link must preserve peer bytes and discard only our temp")
+fs.rename, fs.rename_noreplace = function(a, b)
+    operations[#operations+1]="rename:"..a..">"..b
+    if files[b] then return false, "exists" end
+    files[b]=files[a]; files[a]=nil
+    return true
+end, nil
+old_rename = fs.rename
+
+-- Recover an interrupted producer that linked a complete bitmap, then died
+-- before committing the manifest. Do not replace the orphan's raw bytes.
+files[paths.raw] = string.rep("R", expected)
+files[paths.meta] = nil
+files[temp] = string.rep("R", expected)
+fs.rename_noreplace = function(a, b)
+    if b == paths.raw then return false, "exists" end
+    return old_rename(a, b)
+end
+published,publish_reason=cache.publish_entry(fs,paths,temp,expected,{created=600,width=256,height=16})
+assert(published and publish_reason==nil, "complete orphan raw should gain a manifest")
+assert(files[paths.raw]:sub(1,1) == "R" and files[temp] == nil,
+    "orphan recovery must preserve peer raw and clean up our temp")
+assert(cache.validate_entry(fs,paths,expected), "orphan recovery must commit a reusable cache hit")
+
+-- Two orphan recovery attempts can race to commit the same manifest; the
+-- losing instance must adopt the peer winner and remove its own temporary.
+files[paths.meta] = nil
+files[temp] = string.rep("R", expected)
+fs.rename_noreplace = function(a, b)
+    if b == paths.raw then return false, "exists" end
+    files[paths.meta] = cache.manifest_content(paths, expected,
+        {created=700,width=256,height=16})
+    return false, "exists"
+end
+published,publish_reason=cache.publish_entry(fs,paths,temp,expected,{created=701,width=256,height=16})
+assert(not published and publish_reason=="destination-exists", "peer manifest must win")
+assert(files[temp]==nil and cache.validate_entry(fs,paths,expected),
+    "loser must clean up its temp and retain valid winner")
+fs.rename_noreplace = nil
+
 print("PASS cache_manifest")

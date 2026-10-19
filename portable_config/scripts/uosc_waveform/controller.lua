@@ -957,9 +957,12 @@ function M.start(deps)
         if lock_state == "active" then
             wait_for_lock(refresh_token)
             return
-        elseif lock_state == "stale" and fs.remove then
-            fs.remove(paths.lock)
         end
+        -- Do not unlink an observed stale lock here. Another process may
+        -- replace it between status inspection and removal, causing us to
+        -- delete its newly acquired live lock. start_generation will try an
+        -- exclusive create and, if blocked, safely generate without ownership;
+        -- no-replace publication protects the canonical cache in that case.
         start_generation(refresh_token, info, color)
     end
 

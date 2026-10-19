@@ -34,11 +34,16 @@ local stale = cache.stale_auxiliary_candidates({
     { path = "notes.tmp", mtime = 1 },
     { path = "active.tmp", mtime = 1 },
 }, 100, 50, { ["active.tmp"] = true })
-assert(#stale == 2
-    and stale[1] == "0123456789abcdef-4096x128.lock"
-    and stale[2] == "deadbeef-4096x128.session.tmp",
-    "cleanup must remove only stale waveform auxiliaries")
+assert(#stale == 1 and stale[1] == "deadbeef-4096x128.session.tmp",
+    "cleanup must not unlink a lock based only on file age")
 
+local locked = cache.stale_auxiliary_candidates({
+    { path = "aaaaaaaaaaaaaaaa-256x16.lock", mtime = 1 },
+    { path = "aaaaaaaaaaaaaaaa-256x16.session.tmp", mtime = 1 },
+    { path = "bbbbbbbbbbbbbbbb-256x16.session.tmp", mtime = 1 },
+}, 1000, 10, {})
+assert(#locked == 1 and locked[1] == "bbbbbbbbbbbbbbbb-256x16.session.tmp",
+    "active or stale peer locks must protect their session temporary files")
 local cleanup = cache.cleanup_candidates({
     { path = "deadbeef-4096x128.bgra", size = 4, mtime = 1 },
     { path = "0123456789abcdef-4096x128.meta", size = 1, mtime = 1 },
