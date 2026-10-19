@@ -99,10 +99,20 @@ local function ensure_directory(path)
 end
 
 local function create_exclusive(path, content, created)
-    -- Modern Windows CRT/Lua builds support exclusive "x" creation directly,
-    -- which avoids spawning PowerShell on the common path. Unicode/older CRT
-    -- failures fall back to the wide-path PowerShell helper below.
-    local file, err = io.open(path, "wx")
+    if not windows then
+        -- Lua does not guarantee "x" in io.open modes. POSIX sh noclobber
+        -- creates the lock with O_EXCL on Linux, without overwriting a peer's
+        -- lock. Pass path and payload as arguments, never shell-interpolated.
+        return subprocess({
+            "/bin/sh", "-c", 'set -C; printf %s "$2" > "$1"',
+            "uosc-waveform-lock", path, tostring(content or ""),
+        })
+    end
+
+    -- Windows CRT/Lua builds may support "wx" directly. Others can raise
+    -- "invalid mode" instead of returning nil; fall back to CreateNew.
+    local opened, file, err = pcall(io.open, path, "wx")
+    if not opened then err, file = file, nil end
     if file then
         local ok, write_err = file:write(content or "")
         file:close()
@@ -111,14 +121,11 @@ local function create_exclusive(path, content, created)
     end
     local existing = utils.file_info and utils.file_info(path) or nil
     if existing then return false, err or "exists" end
-    if windows then
-        local owner = tostring(content or ""):match("owner=([^\r\n]+)") or "unknown"
-        local pid = tonumber(tostring(content or ""):match("pid=(%d+)")) or 0
-        local inherited_env = utils.get_env_list and utils.get_env_list() or {}
-        local spec = windows_lock.command_spec(path, created, owner, pid, inherited_env)
-        return subprocess(spec.args, { env = spec.env })
-    end
-    return false, err or "exists"
+    local owner = tostring(content or ""):match("owner=([^\r\n]+)") or "unknown"
+    local pid = tonumber(tostring(content or ""):match("pid=(%d+)")) or 0
+    local inherited_env = utils.get_env_list and utils.get_env_list() or {}
+    local spec = windows_lock.command_spec(path, created, owner, pid, inherited_env)
+    return subprocess(spec.args, { env = spec.env })
 end
 
 local fs = {}
