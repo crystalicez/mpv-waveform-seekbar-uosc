@@ -33,13 +33,9 @@ package.preload["uosc_waveform.geometry"] = function()
         end,
     }
 end
-package.preload["uosc_waveform.overlay"] = function()
-    return { new=function() return {
-        show=function() shown=shown+1; return true end,
-        hide=function() hidden=hidden+1 end,
-        id=function() return 63 end,
-    } end }
-end
+-- Use the real overlay implementation instead of a mocked renderer.
+-- Some native backends apply overlay-add and return nil without an error:
+-- the bitmap is visible and must still be tracked for a later overlay-remove.
 package.preload["uosc_waveform.media"] = function()
     return { inspect=function() return {
         supported=true, source_path="clip.mkv", source_size=1, source_mtime=1,
@@ -64,6 +60,18 @@ local mp = {
     observe_property=function(name,_,cb) observers[name]=cb end,
     register_event=function(name,cb) events[name]=cb end,
     register_script_message=function() end, add_key_binding=function() end,
+    command_native=function(command)
+        local name = command._name or command.name
+        if name == "overlay-add" then
+            shown = shown + 1
+            return nil -- draw succeeded without a native return payload
+        end
+        if name == "overlay-remove" then
+            hidden = hidden + 1
+            return {} -- successful removal
+        end
+        error("unexpected mpv command: " .. tostring(name))
+    end,
     add_timeout=function(seconds,cb)
         local timer={seconds=seconds,callback=cb,dead=false}
         function timer:kill() self.dead=true end
@@ -80,15 +88,18 @@ local fs={
 }
 
 local controller=require("uosc_waveform.controller")
-controller.start({mp=mp,fs=fs,context={config_dir="",platform="windows"},uosc_config={autohide="yes"},uosc_detected=true})
+local app = controller.start({mp=mp,fs=fs,context={config_dir="",platform="windows"},uosc_config={autohide="yes"},uosc_detected=true})
 events["file-loaded"]()
 assert(shown == 1, "cache hit must initially show the waveform")
+assert(app:debug_state().state == controller.STATES.READY_VISIBLE, "real overlay must be tracked")
 observers["mouse-pos"]("mouse-pos", mouse)
 assert(#timers >= 1, "mouse movement must queue uosc-compatible cursor autohide")
 local timer=timers[#timers]
 assert(math.abs(timer.seconds - 0.1) < 1e-6, "autohide timeout must mirror cursor-autohide")
 timer.callback()
 assert(hidden >= 1, "autohide timeout must hide the waveform when uosc hides its cursor UI")
+assert(app:debug_state().state == controller.STATES.READY_HIDDEN,
+    "real overlay must fully leave the timeline after autohide")
 
 -- Any real pointer movement must cancel the synthetic hidden state and reveal
 -- according to fresh proximity again.

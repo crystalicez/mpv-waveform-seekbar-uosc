@@ -19,6 +19,9 @@ function M.new(mpv, opts)
     opts = opts or {}
     local overlay_id = tonumber(opts.overlay_id) or 63
     local visible = false
+    -- An overlay-add attempt may have drawn a bitmap before returning an
+    -- error. Keep cleanup pending until overlay-remove actually succeeds.
+    local remove_pending = false
     local last = nil
     local renderer = {}
 
@@ -50,19 +53,33 @@ function M.new(mpv, opts)
             dw = math.floor(rect.width),
             dh = math.floor(rect.height),
         })
-        local ok, result = pcall(mpv.command_native, command)
-        -- mp.command_native signals errors as nil, error (not necessarily a throw).
-        if not ok or result == nil or result == false then return false end
+        remove_pending = true
+        local ok, result, command_error = pcall(mpv.command_native, command)
+        -- A command may apply its side effect without returning a payload.
+        -- Only nil *with an error* is a failed mpv native command. Treating
+        -- nil by itself as failure leaves a drawn bitmap untracked, so hide()
+        -- never sends overlay-remove when uosc collapses its seekbar.
+        if not ok or result == false or (result == nil and command_error ~= nil) then
+            return false
+        end
         visible = true
         last = current
         return true
     end
 
     function renderer:hide()
-        if not visible then return end
-        pcall(mpv.command_native, mpv_compat.named_command(mpv, "overlay-remove", { id = overlay_id }))
+        if not remove_pending then return true end
+        local ok, result, command_error = pcall(
+            mpv.command_native, mpv_compat.named_command(mpv, "overlay-remove", { id = overlay_id })
+        )
+        if not ok or result == false or (result == nil and command_error ~= nil) then
+            -- Keep ownership information so the next refresh can retry.
+            return false
+        end
         visible = false
+        remove_pending = false
         last = nil
+        return true
     end
 
     function renderer:is_visible() return visible end
