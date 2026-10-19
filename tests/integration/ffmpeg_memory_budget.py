@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import platform
-import resource
 import struct
 import subprocess
 import tempfile
@@ -49,6 +48,8 @@ def main() -> int:
     if platform.system() != "Linux":
         print("SKIP ffmpeg_memory_budget: Linux ru_maxrss gate only")
         return 0
+
+    import resource
 
     root = args.root.resolve()
     with tempfile.TemporaryDirectory(prefix="uosc-waveform-memory-") as directory:

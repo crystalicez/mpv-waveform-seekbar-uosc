@@ -1,5 +1,3 @@
--- Measure Lua heap retention, excluding persistent JIT trace/compiler memory.
-if jit and jit.off then jit.off() end
 local root = assert(arg[1], "source root required")
 package.path = root .. "/portable_config/scripts/?.lua;" .. root .. "/portable_config/scripts/?/init.lua;" .. package.path
 local waveform = require("uosc_waveform.waveform")
@@ -31,14 +29,20 @@ assert(same(full, {16, 32, 64, 128}), "colored pixels must use premultiplied BGR
 local bad, reason = waveform.render_bgra({}, width, height, "#FFFFFF", 1)
 assert(bad == nil and reason == "peak-count-mismatch", "renderer must reject wrong peak count")
 
--- Production-size output and release of the large returned string.
-collectgarbage("collect")
-local baseline = collectgarbage("count")
+-- The first large render may expand the allocator arena, especially under
+-- LuaJIT. Compare steady-state post-GC heap across repeated production renders
+-- so retained allocations (rather than initial allocator growth) are detected.
 local peaks = {}
 for x = 1, 4096 do peaks[x] = (x % 101) / 100 end
-local production = assert(waveform.render_bgra(peaks, 4096, 128, "#FFFFFF", 0.42))
-assert(#production == 4096 * 128 * 4, "production bitmap must be exactly 2 MiB")
-production, peaks = nil, nil
+local function render_production()
+    local production = assert(waveform.render_bgra(peaks, 4096, 128, "#FFFFFF", 0.42))
+    assert(#production == 4096 * 128 * 4, "production bitmap must be exactly 2 MiB")
+end
+render_production()
+collectgarbage("collect")
+local baseline = collectgarbage("count")
+render_production()
+peaks = nil
 collectgarbage("collect")
 local after = collectgarbage("count")
 assert(after <= baseline + 128, string.format("renderer should release temporary heap: baseline=%.2f after=%.2f", baseline, after))

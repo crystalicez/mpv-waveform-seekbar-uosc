@@ -36,23 +36,24 @@ function Invoke-TestCase {
 try {
     Get-ChildItem (Join-Path $Root 'tests\*.lua') | Sort-Object Name | ForEach-Object {
         $name = $_.BaseName
+        $testFile = $_.FullName # switch -Regex also binds $_ to the case label
         Remove-Item $TempConfig -Recurse -Force -ErrorAction SilentlyContinue
         switch -Regex ($name) {
             '^syntax_check$' {
                 $runtime = Get-ChildItem $Scripts -Recurse -File -Filter '*.lua' | Sort-Object FullName | ForEach-Object FullName
-                Invoke-TestCase -Label $name -Arguments (@($_.FullName) + @($runtime))
+                Invoke-TestCase -Label $name -Arguments (@($testFile) + @($runtime))
                 break
             }
             '^(controller_mouse_fade|controller_mouse_proximity|controller_nonstandard_uosc)$' {
-                Invoke-TestCase -Label $name -Arguments @($_.FullName, $Scripts)
+                Invoke-TestCase -Label $name -Arguments @($testFile, $Scripts)
                 break
             }
             '^(bootstrap_single_file|startup_osd_silent)$' {
-                Invoke-TestCase -Label $name -Arguments @($_.FullName, $Entry, $TempConfig)
+                Invoke-TestCase -Label $name -Arguments @($testFile, $Entry, $TempConfig)
                 break
             }
             default {
-                Invoke-TestCase -Label $name -Arguments @($_.FullName, $Root)
+                Invoke-TestCase -Label $name -Arguments @($testFile, $Root)
             }
         }
     }
