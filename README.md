@@ -4,7 +4,8 @@ A third-party mpv Lua script that analyzes the selected audio track with FFmpeg 
 
 The waveform follows uosc's seekbar geometry and mouse-proximity animation. uosc remains responsible for seeking, chapters, thumbnails, A–B loops, and every other timeline interaction.
 
-> Current stable release: **v0.3.0**  
+> Current source version: **v0.3.1 (unreleased)**
+> GitHub Release: **not published yet**
 > Primary supported platform: **Windows 10/11**
 
 ![](example.png)
@@ -51,7 +52,7 @@ Network URLs, live streams, stdin, pipes, DVD, and Blu-ray sources are intention
 
 ## Installation
 
-Download the ZIP from the repository's **Releases** page.
+When a release is published, download its ZIP from the repository's **Releases** page. Until then, the development ZIP is available as a GitHub Actions artifact from a successful workflow run; it is not a stable release.
 
 ### Standard mpv installation
 

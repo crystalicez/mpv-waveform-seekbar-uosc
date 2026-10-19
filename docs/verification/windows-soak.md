@@ -1,6 +1,6 @@
 # Windows release validation
 
-Run this checklist against the exact extracted release ZIP, not the source directory, when validating `v0.3.0` on Windows or investigating a release regression.
+Run this checklist against the exact extracted release-candidate ZIP, not the source directory, when validating `v0.3.1` on Windows or investigating a release regression.
 
 ## Test environment
 

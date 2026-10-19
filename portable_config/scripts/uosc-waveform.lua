@@ -1,4 +1,4 @@
-local SCRIPT_VERSION = "0.3.0"
+local SCRIPT_VERSION = "0.3.1"
 
 local function resolve_script_directory()
     local packaged = mp.get_script_directory and mp.get_script_directory() or nil
