@@ -45,7 +45,11 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install Lua and FFmpeg
         shell: powershell
-        run: choco install lua ffmpeg -y --no-progress
+        run: |
+          choco install lua ffmpeg -y --no-progress
+          $lua = Get-ChildItem "${env:ProgramFiles(x86)}\Lua" -Filter lua.exe -Recurse -File | Select-Object -First 1
+          if (-not $lua) { throw "Chocolatey installed Lua but lua.exe was not found" }
+          Add-Content -Path $env:GITHUB_PATH -Value $lua.DirectoryName
       - name: Run Windows suite
         shell: powershell
         env:

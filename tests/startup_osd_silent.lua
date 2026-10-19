@@ -1,6 +1,10 @@
 local entry = assert(arg[1], "entry path required")
 local config_dir = assert(arg[2], "config path required")
-os.execute(string.format('mkdir -p "%s"', config_dir))
+if package.config:sub(1, 1) == "\\" then
+    os.execute(string.format('mkdir "%s" >nul 2>&1', config_dir))
+else
+    os.execute(string.format('mkdir -p "%s"', config_dir))
+end
 
 package.preload["mp.utils"] = function()
     return {

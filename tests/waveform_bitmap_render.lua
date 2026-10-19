@@ -1,3 +1,5 @@
+-- Measure Lua heap retention, excluding persistent JIT trace/compiler memory.
+if jit and jit.off then jit.off() end
 local root = assert(arg[1], "source root required")
 package.path = root .. "/portable_config/scripts/?.lua;" .. root .. "/portable_config/scripts/?/init.lua;" .. package.path
 local waveform = require("uosc_waveform.waveform")
